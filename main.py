@@ -295,7 +295,7 @@ async def 정보(ctx):
     current_level = user_data["level"]
     next_level = current_level + 1
 
-    current_required = ((current_level * 30) + (current_level ** 2 * 7)) * 18
+    current_required = 0 if current_level == 1 else ((current_level * 30) + (current_level ** 2 * 7)) * 18
     next_required = ((next_level * 30) + (next_level ** 2 * 7)) * 18
 
     remain_exp = max(0, next_required - current_exp)
