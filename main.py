@@ -60,9 +60,17 @@ def calculate_level(exp):
     return 99
 
 def get_role_name_for_level(level):
-    lower = ((level - 1) // 10) * 10 + 1
-    upper = min(lower + 9, 99)
-    return f"[ Lv. {lower} ~ {upper} ]"
+    if level >= 1 and level <= 24:
+        return 1386685631627006000
+    elif level >= 25 and level <= 49:
+        return 1386685631627005999
+    elif level >= 50 and level <= 74:
+        return 1386685631627005998
+    elif level >= 75 and level <= 98:
+        return 1386685631627005997
+    elif level == 99:
+        return 1386685631627005996
+    return None
 
 def generate_nickname(base_name, level):
     clean_base = re.sub(r"\s*\[ Lv\.?.? ?\.?\d+ ?~? ?\d*? ?\]", "", base_name)
