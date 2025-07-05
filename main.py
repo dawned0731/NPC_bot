@@ -268,14 +268,21 @@ async def 정보(ctx):
     current_exp = user_data["exp"]
     current_level = user_data["level"]
     next_level = current_level + 1
+
+    current_required = ((current_level * 30) + (current_level ** 2 * 7)) * 18
     next_required = ((next_level * 30) + (next_level ** 2 * 7)) * 18
+
     remain_exp = max(0, next_required - current_exp)
     role_range = get_role_name_for_level(current_level)
     voice_minutes = user_data.get("voice_minutes", 0)
-    percent = (current_exp / next_required) * 100 if next_required > 0 else 0
+
+    delta = next_required - current_required
+    progress = current_exp - current_required
+    percent = (progress / delta) * 100 if delta > 0 else 0
     filled = int(percent / 10)
     empty = 10 - filled
     bar = "🟦" * filled + "⬜" * empty
+
     embed = discord.Embed(title=f"📊 {ctx.author.display_name}님의 정보", color=discord.Color.blue())
     embed.add_field(name="레벨", value=f"Lv. {current_level} ({role_range})", inline=False)
     embed.add_field(name="경험치", value=f"{current_exp} XP (다음 레벨까지 {remain_exp} XP)", inline=False)
