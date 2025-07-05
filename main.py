@@ -1,3 +1,4 @@
+
 import discord
 from discord.ext import commands, tasks
 import os
@@ -7,6 +8,17 @@ import random
 import re
 from datetime import datetime, timedelta, time as dtime, UTC
 from dotenv import load_dotenv
+import firebase_admin
+from firebase_admin import credentials, db
+
+# ---- Firebase 초기화 ----
+firebase_key_json = os.getenv("FIREBASE_KEY_JSON")
+firebase_key_dict = json.loads(firebase_key_json)
+FIREBASE_DB_URL = "https://npc-bot-add0a-default-rtdb.firebaseio.com"
+cred = credentials.Certificate(firebase_key_dict)
+firebase_admin.initialize_app(cred, {
+    'databaseURL': FIREBASE_DB_URL
+})
 
 # ---- 설정 영역 ----
 os.makedirs("data", exist_ok=True)
@@ -40,6 +52,23 @@ MISSION_REQUIRED_MESSAGES = 30
 REPEAT_VC_EXP_REWARD = 100
 REPEAT_VC_REQUIRED_MINUTES = 15
 REPEAT_VC_MIN_PEOPLE = 5
+
+# ---- Firebase 핸들링 함수 ----
+def load_exp_data():
+    ref = db.reference("exp_data")
+    return ref.get() or {}
+
+def save_exp_data(data):
+    ref = db.reference("exp_data")
+    ref.set(data)
+
+def load_mission_data():
+    ref = db.reference("mission_data")
+    return ref.get() or {}
+
+def save_mission_data(data):
+    ref = db.reference("mission_data")
+    ref.set(data)
 
 # ---- 유틸 ----
 def load_json(path):
@@ -87,12 +116,22 @@ async def on_member_update(before, after):
     if 1386685631580733541 in added_roles:
         channel = bot.get_channel(1386685633413775416)
         if channel:
-            await channel.send(f"{after.mention} 님 어서오세요! '사계절, 그 사이' 서버에 오신 것을 환영합니다!")
+            await channel.send(
+                f"환영합니다 {after.mention} 님! '사계절, 그 사이' 서버입니다.
+
+"
+                "저희 서버는 직접 닉네임을 변경할 수 있어요 !
+"
+                "프로필 우클릭-프로필-프로필 편집.
+
+"
+                "한글로만 구성된 닉네임으로 부탁드릴게요 !"
+            )
 
 # ---- 미접속 인원 로그 태스크 ----
 @tasks.loop(hours=24)
 async def inactive_user_log_task():
-    exp_data = load_json(EXP_PATH)
+    exp_data = load_exp_data()
     now = datetime.now()
     threshold = now - timedelta(days=5)
     log_channel = bot.get_channel(1386685633136820247)
@@ -133,7 +172,7 @@ async def reset_daily_missions():
 @tasks.loop(seconds=VOICE_COOLDOWN)
 async def voice_xp_task():
     now_ts = time.time()
-    exp_data = load_json(EXP_PATH)
+    exp_data = load_exp_data()
     for guild in bot.guilds:
         for vc in guild.voice_channels:
             for member in vc.members:
@@ -150,10 +189,18 @@ async def voice_xp_task():
                     new_level = calculate_level(user_data["exp"])
                     if new_level != user_data.get("level", 1):
                         user_data["level"] = new_level
-                        new_role = discord.utils.get(guild.roles, name=get_role_name_for_level(new_level))
-                        for role in member.roles:
-                            if role.name.startswith("[ Lv."):
-                                await member.remove_roles(role)
+                        role_id = get_role_name_for_level(new_level)
+                        new_role = guild.get_role(role_id) if role_id else None
+                        LEVEL_ROLE_IDS = [
+    1386685631627006000,
+    1386685631627005999,
+    1386685631627005998,
+    1386685631627005997,
+    1386685631627005996,
+]
+for role in member.roles:
+    if role.id in LEVEL_ROLE_IDS:
+        await member.remove_roles(role)
                         if new_role:
                             try:
                                 await member.add_roles(new_role)
@@ -168,13 +215,13 @@ async def voice_xp_task():
                         if channel:
                             await channel.send(f"🎉 {member.mention} 님이 Lv.{new_level} 에 도달했습니다! 🎊")
                     exp_data[user_id] = user_data
-    save_json(EXP_PATH, exp_data)
+    save_exp_data(exp_data)
 
 # ---- 반복 VC 미션 ----
 @tasks.loop(seconds=60)
 async def repeat_vc_mission_task():
-    mission_data = load_json(MISSION_PATH)
-    exp_data = load_json(EXP_PATH)
+    mission_data = load_mission_data()
+    exp_data = load_exp_data()
     now = datetime.now(UTC).strftime("%Y-%m-%d")
     for guild in bot.guilds:
         for vc in guild.voice_channels:
@@ -198,8 +245,8 @@ async def repeat_vc_mission_task():
                     if log_channel:
                         await log_channel.send(f"[🧾 로그] {member.display_name} 님이 반복 VC 미션 완료! +{REPEAT_VC_EXP_REWARD}XP")
                 mission_data[uid] = user_m
-    save_json(MISSION_PATH, mission_data)
-    save_json(EXP_PATH, exp_data)
+    save_mission_data(mission_data)
+    save_exp_data(exp_data)
 
 # ---- 메시지 이벤트 ----
 @bot.event
@@ -208,7 +255,7 @@ async def on_message(message):
         return
 
     # 경험치 지급 (일반 메시지 기준)
-    exp_data = load_json(EXP_PATH)
+    exp_data = load_exp_data()
     user_id = str(message.author.id)
     user_data = exp_data.get(user_id, {"exp": 0, "level": 1, "voice_minutes": 0})
     now = time.time()
@@ -228,10 +275,18 @@ async def on_message(message):
     if new_level != user_data["level"]:
         user_data["level"] = new_level
         guild = message.guild
-        new_role = discord.utils.get(guild.roles, name=get_role_name_for_level(new_level))
-        for role in message.author.roles:
-            if role.name.startswith("[ Lv."):
-                await message.author.remove_roles(role)
+        role_id = get_role_name_for_level(new_level)
+        new_role = guild.get_role(role_id) if role_id else None
+        LEVEL_ROLE_IDS = [
+    1386685631627006000,
+    1386685631627005999,
+    1386685631627005998,
+    1386685631627005997,
+    1386685631627005996,
+]
+for role in message.author.roles:
+    if role.id in LEVEL_ROLE_IDS:
+        await message.author.remove_roles(role)
         if new_role:
             try:
                 await message.author.add_roles(new_role)
@@ -247,7 +302,7 @@ async def on_message(message):
             await level_channel.send(f"🎉 {message.author.mention} 님이 Lv.{new_level} 에 도달했습니다! 🎊")
 
     exp_data[user_id] = user_data
-    save_json(EXP_PATH, exp_data)
+    save_exp_data(exp_data)
 
     await bot.process_commands(message)
 
@@ -255,8 +310,8 @@ async def on_message(message):
     if message.channel.id != TARGET_TEXT_CHANNEL_ID:
         return
 
-    mission_data = load_json(MISSION_PATH)
-    exp_data = load_json(EXP_PATH)
+    mission_data = load_mission_data()
+    exp_data = load_exp_data()
     user_id = str(message.author.id)
     today = datetime.now(UTC).strftime("%Y-%m-%d")
     user_mission = mission_data.get(user_id, {"date": today, "text": {"count": 0, "completed": False}, "repeat_vc": {"minutes": 0}})
@@ -271,7 +326,7 @@ async def on_message(message):
             user_exp["exp"] += MISSION_EXP_REWARD
             user_exp["level"] = calculate_level(user_exp["exp"])
             exp_data[user_id] = user_exp
-            save_json(EXP_PATH, exp_data)
+            save_exp_data(exp_data)
             log_channel = bot.get_channel(LOG_CHANNEL_ID)
             if log_channel:
                 await log_channel.send(f"[🧾 로그] {message.author.display_name} 님이 텍스트 일일 미션 완료! +{MISSION_EXP_REWARD}XP")
@@ -279,14 +334,14 @@ async def on_message(message):
             user_mission["text"]["completed"] = True
 
     mission_data[user_id] = user_mission
-    save_json(MISSION_PATH, mission_data)
+    save_mission_data(mission_data)
 
     
     # ---- !경험치지급 / 차감 ----
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def 경험치지급(ctx, member: discord.Member, amount: int):
-    exp_data = load_json(EXP_PATH)
+    exp_data = load_exp_data()
     user_id = str(member.id)
     user_data = exp_data.get(user_id, {"exp": 0, "level": 1, "voice_minutes": 0})
     previous_level = user_data["level"]
@@ -296,10 +351,18 @@ async def 경험치지급(ctx, member: discord.Member, amount: int):
 
     if new_level > previous_level:
         guild = ctx.guild
-        new_role = discord.utils.get(guild.roles, name=get_role_name_for_level(new_level))
-        for role in member.roles:
-            if role.name.startswith("[ Lv."):
-                await member.remove_roles(role)
+        role_id = get_role_name_for_level(new_level)
+        new_role = guild.get_role(role_id) if role_id else None
+        LEVEL_ROLE_IDS = [
+    1386685631627006000,
+    1386685631627005999,
+    1386685631627005998,
+    1386685631627005997,
+    1386685631627005996,
+]
+for role in member.roles:
+    if role.id in LEVEL_ROLE_IDS:
+        await member.remove_roles(role)
         if new_role:
             try:
                 await member.add_roles(new_role)
@@ -315,7 +378,7 @@ async def 경험치지급(ctx, member: discord.Member, amount: int):
             await channel.send(f"🎉 {member.mention} 님이 Lv.{new_level} 에 도달했습니다! 🎊")
 
     exp_data[user_id] = user_data
-    save_json(EXP_PATH, exp_data)
+    save_exp_data(exp_data)
     await ctx.send(f"✅ {member.mention}에게 경험치 {amount}XP 지급 완료!")
     log_channel = bot.get_channel(LOG_CHANNEL_ID)
     if log_channel:
@@ -324,12 +387,12 @@ async def 경험치지급(ctx, member: discord.Member, amount: int):
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def 경험치차감(ctx, member: discord.Member, amount: int):
-    exp_data = load_json(EXP_PATH)
+    exp_data = load_exp_data()
     user_id = str(member.id)
     user_data = exp_data.get(user_id, {"exp": 0, "level": 1, "voice_minutes": 0})
     user_data["exp"] = max(0, user_data["exp"] - amount)
     user_data["level"] = calculate_level(user_data["exp"])
-    save_json(EXP_PATH, exp_data)
+    save_exp_data(exp_data)
     await ctx.send(f"✅ {member.mention}에게서 경험치 {amount}XP 차감 완료!")
     log_channel = bot.get_channel(LOG_CHANNEL_ID)
     if log_channel:
@@ -339,7 +402,7 @@ async def 경험치차감(ctx, member: discord.Member, amount: int):
 @bot.command()
 async def 정보(ctx):
     user_id = str(ctx.author.id)
-    exp_data = load_json(EXP_PATH)
+    exp_data = load_exp_data()
     user_data = exp_data.get(user_id, {"exp": 0, "level": 1, "voice_minutes": 0})
     current_exp = user_data["exp"]
     current_level = user_data["level"]
@@ -362,16 +425,15 @@ async def 정보(ctx):
 
     embed = discord.Embed(title=f"📊 {ctx.author.display_name}님의 정보", color=discord.Color.blue())
     embed.add_field(name="레벨", value=f"Lv. {current_level} ({role_range})", inline=False)
-    embed.add_field(name="경험치", value=f"[ {current_exp}XP  / {next_required}XP ] (다음 레벨까지 {remain_exp} XP)", inline=False)
-    embed.add_field(name="경험치 진행도", value=f"{bar} ({percent:.1f}%)", inline=False)
-    embed.add_field(name="음성 채널 접속 시간", value=f"{voice_minutes}분", inline=False)
+    embed.add_field(name="경험치", value=f"다음 레벨까지 필요한 경험치량: {remain_exp} XP", inline=False)
+    embed.add_field(name="경험치 진행도", value=f"{bar} ← {percent:.1f}%", inline=False)
     await ctx.send(embed=embed)
 
 # ---- !퀘스트 ----
 @bot.command()
 async def 퀘스트(ctx):
     user_id = str(ctx.author.id)
-    mission_data = load_json(MISSION_PATH)
+    mission_data = load_mission_data()
     today = datetime.now(UTC).strftime("%Y-%m-%d")
     user_m = mission_data.get(user_id, {"date": today, "text": {"count": 0, "completed": False}, "repeat_vc": {"minutes": 0}})
 
@@ -393,7 +455,7 @@ async def 퀘스트(ctx):
 # ---- !랭킹 ----
 @bot.command()
 async def 랭킹(ctx):
-    exp_data = load_json(EXP_PATH)
+    exp_data = load_exp_data()
     sorted_data = sorted(exp_data.items(), key=lambda x: x[1].get("exp", 0), reverse=True)
     user_id = str(ctx.author.id)
     lines = []
