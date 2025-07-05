@@ -239,8 +239,32 @@ async def 경험치지급(ctx, member: discord.Member, amount: int):
     exp_data = load_json(EXP_PATH)
     user_id = str(member.id)
     user_data = exp_data.get(user_id, {"exp": 0, "level": 1, "voice_minutes": 0})
+    previous_level = user_data["level"]
     user_data["exp"] += amount
-    user_data["level"] = calculate_level(user_data["exp"])
+    new_level = calculate_level(user_data["exp"])
+    user_data["level"] = new_level
+
+    if new_level > previous_level:
+        guild = ctx.guild
+        new_role = discord.utils.get(guild.roles, name=get_role_name_for_level(new_level))
+        for role in member.roles:
+            if role.name.startswith("[ Lv."):
+                await member.remove_roles(role)
+        if new_role:
+            try:
+                await member.add_roles(new_role)
+            except:
+                pass
+        try:
+            if member.id != guild.owner_id:
+                await member.edit(nick=generate_nickname(member.display_name, new_level))
+        except:
+            pass
+        channel = bot.get_channel(LEVELUP_ANNOUNCE_CHANNEL)
+        if channel:
+            await channel.send(f"🎉 {member.mention} 님이 Lv.{new_level} 에 도달했습니다! 🎊")
+
+    exp_data[user_id] = user_data
     save_json(EXP_PATH, exp_data)
     await ctx.send(f"✅ {member.mention}에게 경험치 {amount}XP 지급 완료!")
     log_channel = bot.get_channel(LOG_CHANNEL_ID)
@@ -279,7 +303,7 @@ async def 정보(ctx):
     voice_minutes = user_data.get("voice_minutes", 0)
 
     delta = next_required - current_required
-    progress = current_exp - current_required
+    progress = max(0, current_exp - current_required)
     percent = (progress / delta) * 100 if delta > 0 else 0
     filled = int(percent / 10)
     empty = 10 - filled
