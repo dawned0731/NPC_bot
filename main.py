@@ -7,7 +7,6 @@ import random
 import re
 from datetime import datetime, timedelta, time as dtime, UTC
 from dotenv import load_dotenv
-from keep_alive import keep_alive
 
 # ---- 설정 영역 ----
 load_dotenv()
@@ -49,7 +48,6 @@ def load_json(path):
         return json.load(f)
 
 def save_json(path, data):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
         json.dump(data, f, indent=2)
 
@@ -66,8 +64,8 @@ def get_role_name_for_level(level):
     return f"[ Lv. {lower} ~ {upper} ]"
 
 def generate_nickname(base_name, level):
-    clean_base = re.sub(r"\\s*\\[ Lv\\.?.? ?\\.?\\d+ ?~? ?\\d*? ?\\]", "", base_name)
-    clean_base = re.sub(r"\\s*\\[ Lv \\. \\d+ \\]", "", clean_base).strip()
+    clean_base = re.sub(r"\s*\[ Lv\.?.? ?\.?\d+ ?~? ?\d*? ?\]", "", base_name)
+    clean_base = re.sub(r"\s*\[ Lv \. \d+ \]", "", clean_base).strip()
     new_nick = f"{clean_base} [ Lv . {level} ]"
     return new_nick if len(new_nick) <= 32 else clean_base[:32 - len(f" [ Lv . {level} ]")] + f" [ Lv . {level} ]"
 
@@ -91,6 +89,7 @@ async def inactive_user_log_task():
     log_channel = bot.get_channel(1386685633136820247)
     if not log_channel:
         return
+
     for guild in bot.guilds:
         for member in guild.members:
             if member.bot:
@@ -135,6 +134,7 @@ async def voice_xp_task():
                 user_data = exp_data.get(user_id, {"exp": 0, "level": 1, "voice_minutes": 0})
                 if user_data.get("voice_minutes", 0) < MAX_VOICE_MINUTES:
                     gain = random.randint(VOICE_MIN_XP, VOICE_MAX_XP)
+                    print(f"[음성] {member.display_name} +{gain}XP (총 {user_data['exp']}XP)")
                     user_data["exp"] += gain
                     user_data["voice_minutes"] += 1
                     user_data["last_activity"] = now_ts
@@ -191,8 +191,146 @@ async def repeat_vc_mission_task():
     save_json(MISSION_PATH, mission_data)
     save_json(EXP_PATH, exp_data)
 
-# ---- 실행 ----
-from keep_alive import keep_alive
+# ---- 메시지 이벤트 ----
+@bot.event
+async def on_message(message):
+    if message.author.bot:
+        return
 
-keep_alive()
+    await bot.process_commands(message)
+
+    if message.channel.id != TARGET_TEXT_CHANNEL_ID:
+        return
+
+    mission_data = load_json(MISSION_PATH)
+    exp_data = load_json(EXP_PATH)
+    user_id = str(message.author.id)
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
+    user_mission = mission_data.get(user_id, {"date": today, "text": {"count": 0, "completed": False}, "repeat_vc": {"minutes": 0}})
+
+    if user_mission["date"] != today:
+        user_mission = {"date": today, "text": {"count": 0, "completed": False}, "repeat_vc": {"minutes": 0}}
+
+    if not user_mission["text"]["completed"]:
+        user_mission["text"]["count"] += 1
+        if user_mission["text"]["count"] >= MISSION_REQUIRED_MESSAGES:
+            user_exp = exp_data.get(user_id, {"exp": 0, "level": 1, "voice_minutes": 0})
+            user_exp["exp"] += MISSION_EXP_REWARD
+            exp_data[user_id] = user_exp
+            save_json(EXP_PATH, exp_data)
+            log_channel = bot.get_channel(LOG_CHANNEL_ID)
+            if log_channel:
+                await log_channel.send(f"[🧾 로그] {message.author.display_name} 님이 텍스트 일일 미션 완료! +{MISSION_EXP_REWARD}XP")
+            await message.channel.send(f"🎯 {message.author.mention} 일일 미션 완료! +{MISSION_EXP_REWARD}XP 지급되었습니다.")
+            user_mission["text"]["completed"] = True
+
+    mission_data[user_id] = user_mission
+    save_json(MISSION_PATH, mission_data)
+
+    
+    # ---- !경험치지급 / 차감 ----
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def 경험치지급(ctx, member: discord.Member, amount: int):
+    exp_data = load_json(EXP_PATH)
+    user_id = str(member.id)
+    user_data = exp_data.get(user_id, {"exp": 0, "level": 1, "voice_minutes": 0})
+    user_data["exp"] += amount
+    exp_data[user_id] = user_data
+    save_json(EXP_PATH, exp_data)
+    await ctx.send(f"✅ {member.mention}에게 경험치 {amount}XP 지급 완료!")
+    log_channel = bot.get_channel(LOG_CHANNEL_ID)
+    if log_channel:
+        await log_channel.send(f"[🧾 로그] 관리자가 {member.display_name} 님에게 경험치 {amount}XP 지급")
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def 경험치차감(ctx, member: discord.Member, amount: int):
+    exp_data = load_json(EXP_PATH)
+    user_id = str(member.id)
+    user_data = exp_data.get(user_id, {"exp": 0, "level": 1, "voice_minutes": 0})
+    user_data["exp"] = max(0, user_data["exp"] - amount)
+    exp_data[user_id] = user_data
+    save_json(EXP_PATH, exp_data)
+    await ctx.send(f"✅ {member.mention}에게서 경험치 {amount}XP 차감 완료!")
+    log_channel = bot.get_channel(LOG_CHANNEL_ID)
+    if log_channel:
+        await log_channel.send(f"[🧾 로그] 관리자가 {member.display_name} 님에게서 경험치 {amount}XP 차감")
+
+# ---- !정보 ----
+@bot.command()
+async def 정보(ctx):
+    user_id = str(ctx.author.id)
+    exp_data = load_json(EXP_PATH)
+    user_data = exp_data.get(user_id, {"exp": 0, "level": 1, "voice_minutes": 0})
+    current_exp = user_data["exp"]
+    current_level = user_data["level"]
+    next_level = current_level + 1
+    next_required = ((next_level * 30) + (next_level ** 2 * 7)) * 18
+    remain_exp = max(0, next_required - current_exp)
+    role_range = get_role_name_for_level(current_level)
+    voice_minutes = user_data.get("voice_minutes", 0)
+    percent = (current_exp / next_required) * 100 if next_required > 0 else 0
+    filled = int(percent / 10)
+    empty = 10 - filled
+    bar = "🟦" * filled + "⬜" * empty
+    embed = discord.Embed(title=f"📊 {ctx.author.display_name}님의 정보", color=discord.Color.blue())
+    embed.add_field(name="레벨", value=f"Lv. {current_level} ({role_range})", inline=False)
+    embed.add_field(name="경험치", value=f"{current_exp} XP (다음 레벨까지 {remain_exp} XP)", inline=False)
+    embed.add_field(name="경험치 진행도", value=f"{bar} ({percent:.1f}%)", inline=False)
+    embed.add_field(name="음성 채널 접속 시간", value=f"{voice_minutes}분", inline=False)
+    await ctx.send(embed=embed)
+
+# ---- !퀘스트 ----
+@bot.command()
+async def 퀘스트(ctx):
+    user_id = str(ctx.author.id)
+    mission_data = load_json(MISSION_PATH)
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    user_m = mission_data.get(user_id, {"date": today, "text": {"count": 0, "completed": False}, "repeat_vc": {"minutes": 0}})
+
+    if user_m.get("date") != today:
+        user_m = {"date": today, "text": {"count": 0, "completed": False}, "repeat_vc": {"minutes": 0}}
+
+    text_count = user_m["text"].get("count", 0)
+    text_status = "✅ 완료" if user_m["text"].get("completed", False) else f"{text_count} / {MISSION_REQUIRED_MESSAGES} → 미완료"
+
+    vc_minutes = user_m["repeat_vc"].get("minutes", 0)
+    vc_rewards = vc_minutes // REPEAT_VC_REQUIRED_MINUTES
+    vc_status = f"{vc_minutes}분 → {vc_rewards}회 보상 지급됨"
+
+    embed = discord.Embed(title="📜 퀘스트 현황", color=discord.Color.green())
+    embed.add_field(name="🗨️ 텍스트 미션 (일일)", value=text_status, inline=False)
+    embed.add_field(name="🔁 반복 VC 미션 (누적)", value=vc_status, inline=False)
+    await ctx.send(embed=embed)
+
+# ---- !랭킹 ----
+@bot.command()
+async def 랭킹(ctx):
+    exp_data = load_json(EXP_PATH)
+    sorted_data = sorted(exp_data.items(), key=lambda x: x[1].get("exp", 0), reverse=True)
+    user_id = str(ctx.author.id)
+    lines = []
+    user_rank = None
+    for i, (uid, data) in enumerate(sorted_data[:10], 1):
+        try:
+            member = await ctx.guild.fetch_member(int(uid))
+            name = member.display_name
+        except:
+            name = "Unknown"
+        lines.append(f"{i}위. {name} - Lv. {data.get('level', 1)} ({data.get('exp', 0)} XP)")
+    for i, (uid, data) in enumerate(sorted_data, 1):
+        if uid == user_id:
+            user_rank = f"당신의 순위: {i}위 - Lv. {data.get('level', 1)} ({data.get('exp', 0)} XP)"
+            break
+    embed = discord.Embed(
+        title="🏆 경험치 랭킹 (TOP 10)",
+        description="\n".join(lines),
+        color=discord.Color.gold()
+    )
+    if user_rank:
+        embed.add_field(name="📍 현재 내 순위", value=user_rank, inline=False)
+    await ctx.send(embed=embed)
+
+# ---- 실행 ----
 bot.run(TOKEN)
