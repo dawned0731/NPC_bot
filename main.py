@@ -295,7 +295,7 @@ async def 정보(ctx):
     current_level = user_data["level"]
     next_level = current_level + 1
 
-    current_required = 0 if current_level == 1 else ((current_level * 30) + (current_level ** 2 * 7)) * 18
+    current_required = ((current_level * 30) + (current_level ** 2 * 7)) * 18 if current_level > 1 else 0
     next_required = ((next_level * 30) + (next_level ** 2 * 7)) * 18
 
     remain_exp = max(0, next_required - current_exp)
@@ -303,15 +303,16 @@ async def 정보(ctx):
     voice_minutes = user_data.get("voice_minutes", 0)
 
     delta = next_required - current_required
-    progress = max(0, current_exp - current_required)
+    progress = current_exp - current_required
+    progress = max(0, progress)
     percent = (progress / delta) * 100 if delta > 0 else 0
-    filled = int(percent / 10)
-    empty = 10 - filled
+    filled = int(percent / 5)
+    empty = 20 - filled
     bar = "🟦" * filled + "⬜" * empty
 
     embed = discord.Embed(title=f"📊 {ctx.author.display_name}님의 정보", color=discord.Color.blue())
     embed.add_field(name="레벨", value=f"Lv. {current_level} ({role_range})", inline=False)
-    embed.add_field(name="경험치", value=f"{current_exp} XP (다음 레벨까지 {remain_exp} XP)", inline=False)
+    embed.add_field(name="경험치", value=f"[ {current_exp}XP  / {next_required}XP ] (다음 레벨까지 {remain_exp} XP)", inline=False)
     embed.add_field(name="경험치 진행도", value=f"{bar} ({percent:.1f}%)", inline=False)
     embed.add_field(name="음성 채널 접속 시간", value=f"{voice_minutes}분", inline=False)
     await ctx.send(embed=embed)
