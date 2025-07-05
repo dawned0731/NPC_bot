@@ -277,40 +277,39 @@ async def on_message(message):
     new_level = calculate_level(user_data["exp"])
 
     if new_level != user_data["level"]:
-        user_data["level"] = new_level
-        guild = message.guild
-        role_id = get_role_name_for_level(new_level)
-        new_role = guild.get_role(role_id) if role_id else None
-        LEVEL_ROLE_IDS = [
-            1386685631627006000,
-            1386685631627005999,
-            1386685631627005998,
-            1386685631627005997,
-            1386685631627005996,
-        ]
-        for role in message.author.roles:
-            if role.id in LEVEL_ROLE_IDS:
-                await message.author.remove_roles(role)
-        if new_role:
-            try:
-                await message.author.add_roles(new_role)
-            except:
-                pass
-
+    user_data["level"] = new_level
+    guild = message.guild
+    role_id = get_role_name_for_level(new_level)
+    new_role = guild.get_role(role_id) if role_id else None
+    LEVEL_ROLE_IDS = [
+        1386685631627006000,
+        1386685631627005999,
+        1386685631627005998,
+        1386685631627005997,
+        1386685631627005996,
+    ]
+    for role in message.author.roles:
+        if role.id in LEVEL_ROLE_IDS:
+            await message.author.remove_roles(role)
+    if new_role:
         try:
-            if message.author.id != guild.owner_id:
-                await message.author.edit(nick=generate_nickname(message.author.display_name, new_level))
+            await message.author.add_roles(new_role)
         except:
             pass
-        level_channel = bot.get_channel(LEVELUP_ANNOUNCE_CHANNEL)
-        if level_channel:
-            await level_channel.send(f"🎉 {message.author.mention} 님이 Lv.{new_level} 에 도달했습니다! 🎊")
+
+    try:
+        if message.author.id != guild.owner_id:
+            await message.author.edit(nick=generate_nickname(message.author.display_name, new_level))
+    except:
+        pass
+    level_channel = bot.get_channel(LEVELUP_ANNOUNCE_CHANNEL)
+    if level_channel:
+        await level_channel.send(f"🎉 {message.author.mention} 님이 Lv.{new_level} 에 도달했습니다! 🎊")
 
     exp_data[user_id] = user_data
     save_exp_data(exp_data)
 
     await bot.process_commands(message)
-
 
     # 텍스트 미션은 지정 채널에서만 집계
     if message.channel.id != TARGET_TEXT_CHANNEL_ID:
