@@ -288,6 +288,11 @@ async def 경험치차감(ctx, member: discord.Member, amount: int):
 # ---- !정보 ----
 @bot.command()
 async def 정보(ctx):
+    def required_exp(level):
+        if level < 1:
+            return 0
+        return ((level * 30) + (level ** 2 * 7)) * 18
+
     user_id = str(ctx.author.id)
     exp_data = load_json(EXP_PATH)
     user_data = exp_data.get(user_id, {"exp": 0, "level": 1, "voice_minutes": 0})
@@ -295,24 +300,23 @@ async def 정보(ctx):
     current_level = user_data["level"]
     next_level = current_level + 1
 
-    current_required = ((current_level * 30) + (current_level ** 2 * 7)) * 18 if current_level > 1 else 0
-    next_required = ((next_level * 30) + (next_level ** 2 * 7)) * 18
-
+    prev_required = required_exp(current_level - 1) if current_level > 1 else 0
+    next_required = required_exp(current_level)
+    required_for_next = next_required - prev_required
     remain_exp = max(0, next_required - current_exp)
     role_range = get_role_name_for_level(current_level)
     voice_minutes = user_data.get("voice_minutes", 0)
 
-    delta = next_required - current_required
-    progress = current_exp - current_required
+    progress = current_exp - prev_required
     progress = max(0, progress)
-    percent = (progress / delta) * 100 if delta > 0 else 0
-    filled = int(percent / 10)
-    empty = 10 - filled
+    percent = (progress / required_for_next) * 100 if required_for_next > 0 else 0
+    filled = int(percent / 5)
+    empty = 20 - filled
     bar = "🟦" * filled + "⬜" * empty
 
     embed = discord.Embed(title=f"📊 {ctx.author.display_name}님의 정보", color=discord.Color.blue())
     embed.add_field(name="레벨", value=f"Lv. {current_level} ({role_range})", inline=False)
-    embed.add_field(name="경험치", value=f"{current_exp} XP (다음 레벨까지 {remain_exp} XP)", inline=False)
+    embed.add_field(name="경험치", value=f"[ {current_exp}XP  / {next_required}XP ] (다음 레벨까지 {remain_exp} XP, 필요: {required_for_next} XP)", inline=False)
     embed.add_field(name="경험치 진행도", value=f"{bar} ({percent:.1f}%)", inline=False)
     embed.add_field(name="음성 채널 접속 시간", value=f"{voice_minutes}분", inline=False)
     await ctx.send(embed=embed)
