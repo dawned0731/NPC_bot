@@ -202,16 +202,16 @@ if new_role:
         await member.add_roles(new_role)
     except:
         pass
-                            except:
-                                pass
-                        try:
-                            if member.id != guild.owner_id:
-                                await member.edit(nick=generate_nickname(member.display_name, new_level))
-                        except:
-                            pass
-                        channel = bot.get_channel(LEVELUP_ANNOUNCE_CHANNEL)
-                        if channel:
-                            await channel.send(f"🎉 {member.mention} 님이 Lv.{new_level} 에 도달했습니다! 🎊")
+
+    try:
+        if member.id != guild.owner_id:
+            await member.edit(nick=generate_nickname(member.display_name, new_level))
+    except:
+        pass
+
+channel = bot.get_channel(LEVELUP_ANNOUNCE_CHANNEL)
+if channel:
+    await channel.send(f"🎉 {member.mention} 님이 Lv.{new_level} 에 도달했습니다! 🎊")
                     exp_data[user_id] = user_data
     save_exp_data(exp_data)
 
@@ -286,15 +286,16 @@ for role in message.author.roles:
     if role.id in LEVEL_ROLE_IDS:
         await message.author.remove_roles(role)
         if new_role:
-            try:
-                await message.author.add_roles(new_role)
-            except:
-                pass
-        try:
-            if message.author.id != guild.owner_id:
-                await message.author.edit(nick=generate_nickname(message.author.display_name, new_level))
-        except:
-            pass
+    try:
+        await message.author.add_roles(new_role)
+    except:
+        pass
+
+    try:
+        if message.author.id != guild.owner_id:
+            await message.author.edit(nick=generate_nickname(message.author.display_name, new_level))
+    except:
+        pass
         level_channel = bot.get_channel(LEVELUP_ANNOUNCE_CHANNEL)
         if level_channel:
             await level_channel.send(f"🎉 {message.author.mention} 님이 Lv.{new_level} 에 도달했습니다! 🎊")
@@ -367,8 +368,6 @@ if new_role:
         await member.add_roles(new_role)
     except:
         pass
-            except:
-                pass
         try:
             if member.id != guild.owner_id:
                 await member.edit(nick=generate_nickname(member.display_name, new_level))
