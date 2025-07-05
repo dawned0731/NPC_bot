@@ -200,6 +200,7 @@ async def on_message(message):
 
     await bot.process_commands(message)
 
+    # 텍스트 미션은 지정 채널에서만 집계
     if message.channel.id != TARGET_TEXT_CHANNEL_ID:
         return
 
