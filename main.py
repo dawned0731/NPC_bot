@@ -11,6 +11,7 @@ import firebase_admin
 from firebase_admin import credentials, db
 
 # ---- Firebase 초기화 ----
+load_dotenv()
 firebase_key_json = os.getenv("FIREBASE_KEY_JSON")
 firebase_key_dict = json.loads(firebase_key_json)
 FIREBASE_DB_URL = "https://npc-bot-add0a-default-rtdb.firebaseio.com"
