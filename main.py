@@ -117,14 +117,13 @@ async def on_member_update(before, after):
         channel = bot.get_channel(1386685633413775416)
         if channel:
             await channel.send(
-    f"""환영합니다 {after.mention} 님! '사계절, 그 사이' 서버입니다.
+            f"""환영합니다 {after.mention} 님! '사계절, 그 사이' 서버입니다.
 
 저희 서버는 직접 닉네임을 변경할 수 있어요 !
 프로필 우클릭-프로필-프로필 편집.
 
 한글로만 구성된 닉네임으로 부탁드릴게요 !"""
-)
-
+        )
 # ---- 미접속 인원 로그 태스크 ----
 @tasks.loop(hours=24)
 async def inactive_user_log_task():
@@ -198,7 +197,7 @@ async def voice_xp_task():
 for role in member.roles:
     if role.id in LEVEL_ROLE_IDS:
         await member.remove_roles(role)
-                        if new_role:
+if new_role:
                             try:
                                 await member.add_roles(new_role)
                             except:
@@ -360,7 +359,7 @@ async def 경험치지급(ctx, member: discord.Member, amount: int):
 for role in member.roles:
     if role.id in LEVEL_ROLE_IDS:
         await member.remove_roles(role)
-        if new_role:
+if new_role:
             try:
                 await member.add_roles(new_role)
             except:
