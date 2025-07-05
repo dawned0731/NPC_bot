@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, time as dtime, UTC
 from dotenv import load_dotenv
 
 # ---- 설정 영역 ----
+os.makedirs("data", exist_ok=True)
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 PREFIX = "!"
@@ -286,7 +287,7 @@ async def 정보(ctx):
 async def 퀘스트(ctx):
     user_id = str(ctx.author.id)
     mission_data = load_json(MISSION_PATH)
-    today = datetime.utcnow().strftime("%Y-%m-%d")
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
     user_m = mission_data.get(user_id, {"date": today, "text": {"count": 0, "completed": False}, "repeat_vc": {"minutes": 0}})
 
     if user_m.get("date") != today:
