@@ -199,6 +199,48 @@ async def on_message(message):
     if message.author.bot:
         return
 
+    # 경험치 지급 (일반 메시지 기준)
+    exp_data = load_json(EXP_PATH)
+    user_id = str(message.author.id)
+    user_data = exp_data.get(user_id, {"exp": 0, "level": 1, "voice_minutes": 0})
+    now = time.time()
+    last_time = user_data.get("last_activity", 0)
+    if now - last_time >= COOLDOWN_SECONDS:
+        gain = random.randint(1, 6)
+        user_data["exp"] += gain
+        user_data["last_activity"] = now
+        print(f"[채팅] {message.author.display_name} +{gain}XP (총 {user_data['exp']}XP)")
+        try:
+            if message.author.id != message.guild.owner_id:
+                await message.author.edit(nick=generate_nickname(message.author.display_name, user_data["level"]))
+        except:
+            pass
+    new_level = calculate_level(user_data["exp"])
+
+    if new_level != user_data["level"]:
+        user_data["level"] = new_level
+        guild = message.guild
+        new_role = discord.utils.get(guild.roles, name=get_role_name_for_level(new_level))
+        for role in message.author.roles:
+            if role.name.startswith("[ Lv."):
+                await message.author.remove_roles(role)
+        if new_role:
+            try:
+                await message.author.add_roles(new_role)
+            except:
+                pass
+        try:
+            if message.author.id != guild.owner_id:
+                await message.author.edit(nick=generate_nickname(message.author.display_name, new_level))
+        except:
+            pass
+        level_channel = bot.get_channel(LEVELUP_ANNOUNCE_CHANNEL)
+        if level_channel:
+            await level_channel.send(f"🎉 {message.author.mention} 님이 Lv.{new_level} 에 도달했습니다! 🎊")
+
+    exp_data[user_id] = user_data
+    save_json(EXP_PATH, exp_data)
+
     await bot.process_commands(message)
 
     # 텍스트 미션은 지정 채널에서만 집계
@@ -288,11 +330,6 @@ async def 경험치차감(ctx, member: discord.Member, amount: int):
 # ---- !정보 ----
 @bot.command()
 async def 정보(ctx):
-    def required_exp(level):
-        if level < 1:
-            return 0
-        return ((level * 30) + (level ** 2 * 7)) * 18
-
     user_id = str(ctx.author.id)
     exp_data = load_json(EXP_PATH)
     user_data = exp_data.get(user_id, {"exp": 0, "level": 1, "voice_minutes": 0})
@@ -300,23 +337,24 @@ async def 정보(ctx):
     current_level = user_data["level"]
     next_level = current_level + 1
 
-    prev_required = required_exp(current_level - 1) if current_level > 1 else 0
-    next_required = required_exp(current_level)
-    required_for_next = next_required - prev_required
+    current_required = ((current_level * 30) + (current_level ** 2 * 7)) * 18 if current_level > 1 else 0
+    next_required = ((next_level * 30) + (next_level ** 2 * 7)) * 18
+
     remain_exp = max(0, next_required - current_exp)
     role_range = get_role_name_for_level(current_level)
     voice_minutes = user_data.get("voice_minutes", 0)
 
-    progress = current_exp - prev_required
+    delta = next_required - current_required
+    progress = current_exp - current_required
     progress = max(0, progress)
-    percent = (progress / required_for_next) * 100 if required_for_next > 0 else 0
+    percent = (progress / delta) * 100 if delta > 0 else 0
     filled = int(percent / 5)
     empty = 20 - filled
     bar = "🟦" * filled + "⬜" * empty
 
     embed = discord.Embed(title=f"📊 {ctx.author.display_name}님의 정보", color=discord.Color.blue())
     embed.add_field(name="레벨", value=f"Lv. {current_level} ({role_range})", inline=False)
-    embed.add_field(name="경험치", value=f"[ {current_exp}XP  / {next_required}XP ] (다음 레벨까지 {remain_exp} XP, 필요: {required_for_next} XP)", inline=False)
+    embed.add_field(name="경험치", value=f"[ {current_exp}XP  / {next_required}XP ] (다음 레벨까지 {remain_exp} XP)", inline=False)
     embed.add_field(name="경험치 진행도", value=f"{bar} ({percent:.1f}%)", inline=False)
     embed.add_field(name="음성 채널 접속 시간", value=f"{voice_minutes}분", inline=False)
     await ctx.send(embed=embed)
