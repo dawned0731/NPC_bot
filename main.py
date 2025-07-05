@@ -1,4 +1,3 @@
-
 import discord
 from discord.ext import commands, tasks
 import os
@@ -197,9 +196,12 @@ async def voice_xp_task():
 for role in member.roles:
     if role.id in LEVEL_ROLE_IDS:
         await member.remove_roles(role)
+
 if new_role:
-                            try:
-                                await member.add_roles(new_role)
+    try:
+        await member.add_roles(new_role)
+    except:
+        pass
                             except:
                                 pass
                         try:
@@ -359,9 +361,12 @@ async def 경험치지급(ctx, member: discord.Member, amount: int):
 for role in member.roles:
     if role.id in LEVEL_ROLE_IDS:
         await member.remove_roles(role)
+
 if new_role:
-            try:
-                await member.add_roles(new_role)
+    try:
+        await member.add_roles(new_role)
+    except:
+        pass
             except:
                 pass
         try:
@@ -492,3 +497,4 @@ def run_web():
 threading.Thread(target=run_web).start()
 
 bot.run(TOKEN)
+
