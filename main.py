@@ -183,6 +183,7 @@ async def repeat_vc_mission_task():
                 if user_m["repeat_vc"]["minutes"] % REPEAT_VC_REQUIRED_MINUTES == 0:
                     user_exp = exp_data.get(uid, {"exp": 0, "level": 1, "voice_minutes": 0})
                     user_exp["exp"] += REPEAT_VC_EXP_REWARD
+                    user_exp["level"] = calculate_level(user_exp["exp"])
                     user_exp["last_activity"] = time.time()
                     exp_data[uid] = user_exp
                     log_channel = bot.get_channel(LOG_CHANNEL_ID)
@@ -218,6 +219,7 @@ async def on_message(message):
         if user_mission["text"]["count"] >= MISSION_REQUIRED_MESSAGES:
             user_exp = exp_data.get(user_id, {"exp": 0, "level": 1, "voice_minutes": 0})
             user_exp["exp"] += MISSION_EXP_REWARD
+            user_exp["level"] = calculate_level(user_exp["exp"])
             exp_data[user_id] = user_exp
             save_json(EXP_PATH, exp_data)
             log_channel = bot.get_channel(LOG_CHANNEL_ID)
@@ -238,7 +240,7 @@ async def 경험치지급(ctx, member: discord.Member, amount: int):
     user_id = str(member.id)
     user_data = exp_data.get(user_id, {"exp": 0, "level": 1, "voice_minutes": 0})
     user_data["exp"] += amount
-    exp_data[user_id] = user_data
+    user_data["level"] = calculate_level(user_data["exp"])
     save_json(EXP_PATH, exp_data)
     await ctx.send(f"✅ {member.mention}에게 경험치 {amount}XP 지급 완료!")
     log_channel = bot.get_channel(LOG_CHANNEL_ID)
@@ -252,7 +254,7 @@ async def 경험치차감(ctx, member: discord.Member, amount: int):
     user_id = str(member.id)
     user_data = exp_data.get(user_id, {"exp": 0, "level": 1, "voice_minutes": 0})
     user_data["exp"] = max(0, user_data["exp"] - amount)
-    exp_data[user_id] = user_data
+    user_data["level"] = calculate_level(user_data["exp"])
     save_json(EXP_PATH, exp_data)
     await ctx.send(f"✅ {member.mention}에게서 경험치 {amount}XP 차감 완료!")
     log_channel = bot.get_channel(LOG_CHANNEL_ID)
