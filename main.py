@@ -438,9 +438,9 @@ async def 정보(ctx):
     user_id = str(ctx.author.id)
     exp_data = load_exp_data()
     user_data = exp_data.get(user_id, {"exp": 0, "level": 1, "voice_minutes": 0})
-current_exp = user_data["exp"]
-current_level = calculate_level(current_exp)
-next_level = current_level + 1
+    current_exp = user_data["exp"]
+    current_level = calculate_level(current_exp)
+    next_level = current_level + 1
 
     current_required = ((current_level * 30) + (current_level ** 2 * 7)) * 18 if current_level > 1 else 0
     next_required = ((next_level * 30) + (next_level ** 2 * 7)) * 18
