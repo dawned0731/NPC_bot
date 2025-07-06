@@ -442,15 +442,20 @@ async def 정보(ctx):
     current_level = calculate_level(current_exp)
     next_level = current_level + 1
 
-    current_required = ((current_level * 30) + (current_level ** 2 * 7)) * 18 if current_level > 1 else 0
-    next_required = ((next_level * 30) + (next_level ** 2 * 7)) * 18
+    # -- 누적 경험치 구간 산식 보정 --
+    if current_level > 1:
+        prev_required = ((current_level - 1) * 30) + ((current_level - 1) ** 2 * 7)
+        prev_required *= 18
+    else:
+        prev_required = 0
+    current_required = ((current_level * 30) + (current_level ** 2 * 7)) * 18
 
-    remain_exp = max(0, next_required - current_exp)
+    remain_exp = max(0, current_required - current_exp)
     role_range = get_role_name_for_level(current_level)
     voice_minutes = user_data.get("voice_minutes", 0)
 
-    delta = next_required - current_required
-    progress = current_exp - current_required
+    delta = current_required - prev_required
+    progress = current_exp - prev_required
     progress = max(0, progress)
     percent = (progress / delta) * 100 if delta > 0 else 0
     filled = int(percent / 5)
@@ -462,6 +467,7 @@ async def 정보(ctx):
     embed.add_field(name="경험치", value=f"{progress:,} / {delta:,} XP", inline=False)
     embed.add_field(name="경험치 진행도", value=f"{bar} ← {percent:.1f}%", inline=False)
     await ctx.send(embed=embed)
+
 
 # ---- !퀘스트 ----
 @bot.command()
