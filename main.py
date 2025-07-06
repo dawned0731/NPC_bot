@@ -127,6 +127,34 @@ async def on_member_update(before, after):
 
 한글로만 구성된 닉네임으로 부탁드릴게요 !"""
         )
+        # ---------- 여기부터 추가 ----------
+        exp_data = load_exp_data()
+        user_id = str(after.id)
+        user_data = exp_data.get(user_id, {"exp": 0, "level": 1, "voice_minutes": 0})
+        new_level = calculate_level(user_data["exp"])
+        guild = after.guild
+        role_id = get_role_name_for_level(new_level)
+        new_role = guild.get_role(role_id) if role_id else None
+        LEVEL_ROLE_IDS = [
+            1386685631627006000,
+            1386685631627005999,
+            1386685631627005998,
+            1386685631627005997,
+            1386685631627005996,
+        ]
+        for role in after.roles:
+            if role.id in LEVEL_ROLE_IDS:
+                await after.remove_roles(role)
+        if new_role:
+            try:
+                await after.add_roles(new_role)
+            except:
+                pass
+        try:
+            if after.id != guild.owner_id:
+                await after.edit(nick=generate_nickname(after.display_name, new_level))
+        except:
+            pass
 # ---- 미접속 인원 로그 태스크 ----
 @tasks.loop(hours=24)
 async def inactive_user_log_task():
@@ -410,9 +438,9 @@ async def 정보(ctx):
     user_id = str(ctx.author.id)
     exp_data = load_exp_data()
     user_data = exp_data.get(user_id, {"exp": 0, "level": 1, "voice_minutes": 0})
-    current_exp = user_data["exp"]
-    current_level = user_data["level"]
-    next_level = current_level + 1
+current_exp = user_data["exp"]
+current_level = calculate_level(current_exp)
+next_level = current_level + 1
 
     current_required = ((current_level * 30) + (current_level ** 2 * 7)) * 18 if current_level > 1 else 0
     next_required = ((next_level * 30) + (next_level ** 2 * 7)) * 18
@@ -430,8 +458,8 @@ async def 정보(ctx):
     bar = "🟦" * filled + "⬜" * empty
 
     embed = discord.Embed(title=f"📊 {ctx.author.display_name}님의 정보", color=discord.Color.blue())
-    embed.add_field(name="레벨", value=f"Lv. {current_level} ({role_range})", inline=False)
-    embed.add_field(name="경험치", value=f"다음 레벨까지 필요한 경험치량: {remain_exp} XP", inline=False)
+    embed.add_field(name="레벨", value=f"Lv. {current_level} (누적 경험치: {current_exp:,} XP)", inline=False)
+    embed.add_field(name="경험치", value=f"{progress:,} / {delta:,} XP", inline=False)
     embed.add_field(name="경험치 진행도", value=f"{bar} ← {percent:.1f}%", inline=False)
     await ctx.send(embed=embed)
 
@@ -502,4 +530,3 @@ def run_web():
 threading.Thread(target=run_web).start()
 
 bot.run(TOKEN)
-
