@@ -305,7 +305,7 @@ async def on_message(message):
             await member.add_roles(role)
         # 안내 메시지 없이 역할만 자동 부여
 
-    # 경험치 지급 (일반 메시지 기준)    exp_data = load_exp_data()
+    exp_data = load_exp_data()
     user_id = str(message.author.id)
     user_data = exp_data.get(user_id, {"exp": 0, "level": 1, "voice_minutes": 0})
     now = time.time()
