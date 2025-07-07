@@ -64,7 +64,11 @@ def load_exp_data():
 def save_exp_data(data):
     ref = db.reference("exp_data")
     ref.set(data)
-
+    
+def save_user_exp(user_id, user_data):
+    ref = db.reference("exp_data")
+    ref.child(user_id).set(user_data)
+    
 def load_mission_data():
     ref = db.reference("mission_data")
     return ref.get() or {}
@@ -72,7 +76,11 @@ def load_mission_data():
 def save_mission_data(data):
     ref = db.reference("mission_data")
     ref.set(data)
-
+    
+def save_user_mission(user_id, user_mission):
+    ref = db.reference("mission_data")
+    ref.child(user_id).set(user_mission)
+    
 # ---- 유틸 ----
 def load_json(path):
     if not os.path.exists(path):
@@ -245,8 +253,8 @@ async def voice_xp_task():
                         if channel:
                             await channel.send(f"🎉 {member.mention} 님이 Lv.{new_level} 에 도달했습니다! 🎊")
 
-                    exp_data[user_id] = user_data
-                    save_exp_data(exp_data)
+
+                    save_user_exp(user_id, user_data)
 
 
 # ---- 반복 VC 미션 ----
@@ -286,6 +294,7 @@ async def on_message(message):
     if message.author.bot:
         return
 
+
     # ---- (정밀 패치) 특정 스레드 채팅 감지 시, 역할 자동 부여 ----
     if message.channel.id == 1389632514045251674:
         role_id = 1386685631580733541
@@ -296,8 +305,7 @@ async def on_message(message):
             await member.add_roles(role)
         # 안내 메시지 없이 역할만 자동 부여
 
-    # 경험치 지급 (일반 메시지 기준)
-    exp_data = load_exp_data()
+    # 경험치 지급 (일반 메시지 기준)    exp_data = load_exp_data()
     user_id = str(message.author.id)
     user_data = exp_data.get(user_id, {"exp": 0, "level": 1, "voice_minutes": 0})
     now = time.time()
@@ -313,7 +321,6 @@ async def on_message(message):
         except:
             pass
     new_level = calculate_level(user_data["exp"])
-
     if new_level != user_data["level"]:
         user_data["level"] = new_level
         guild = message.guild
@@ -343,12 +350,12 @@ async def on_message(message):
         level_channel = bot.get_channel(LEVELUP_ANNOUNCE_CHANNEL)
         if level_channel:
             await level_channel.send(f"🎉 {message.author.mention} 님이 Lv.{new_level} 에 도달했습니다! 🎊")
-
-    exp_data[user_id] = user_data
-    save_exp_data(exp_data)
+    # === 기존: exp_data[user_id] = user_data
+    # === 기존: save_exp_data(exp_data)
+    # === 교체: 아래 한 줄
+    save_user_exp(user_id, user_data)
 
     await bot.process_commands(message)
-
     # 텍스트 미션은 지정 채널에서만 집계
     if message.channel.id != TARGET_TEXT_CHANNEL_ID:
         return
@@ -377,7 +384,7 @@ async def on_message(message):
             user_mission["text"]["completed"] = True
 
     mission_data[user_id] = user_mission
-    save_mission_data(mission_data)
+    save_user_mission(user_id, user_mission)
 
     
     # ---- !경험치지급 / 차감 ----
