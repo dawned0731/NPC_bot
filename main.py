@@ -55,6 +55,7 @@ MISSION_REQUIRED_MESSAGES = 30
 REPEAT_VC_EXP_REWARD = 100
 REPEAT_VC_REQUIRED_MINUTES = 15
 REPEAT_VC_MIN_PEOPLE = 5
+SPECIAL_VC_CATEGORY_IDS = [1386685633820495991]
 
 # ---- Firebase 핸들링 함수 ----
 def load_exp_data():
@@ -210,51 +211,61 @@ async def voice_xp_task():
     exp_data = load_exp_data()
     for guild in bot.guilds:
         for vc in guild.voice_channels:
+            # ---- (추가) 카테고리 체크 ----
+            is_special = vc.category and vc.category.id in SPECIAL_VC_CATEGORY_IDS
             for member in vc.members:
                 if member.bot or vc.id in AFK_CHANNEL_IDS:
                     continue
                 user_id = str(member.id)
                 user_data = exp_data.get(user_id, {"exp": 0, "level": 1, "voice_minutes": 0})
-                if user_data.get("voice_minutes", 0) < MAX_VOICE_MINUTES:
+
+                # ---- (변경) 경험치 획득량 분기 ----
+                if is_special:
+                    gain = max(1, int(random.randint(VOICE_MIN_XP, VOICE_MAX_XP) * 0.2))
+                else:
                     gain = random.randint(VOICE_MIN_XP, VOICE_MAX_XP)
-                    print(f"[음성] {member.display_name} +{gain}XP (총 {user_data['exp']}XP)")
-                    user_data["exp"] += gain
-                    user_data["voice_minutes"] += 1
-                    user_data["last_activity"] = now_ts
-                    new_level = calculate_level(user_data["exp"])
-                    if new_level != user_data.get("level", 1):
-                        user_data["level"] = new_level
-                        role_id = get_role_name_for_level(new_level)
-                        new_role = guild.get_role(role_id) if role_id else None
-                        LEVEL_ROLE_IDS = [
-                            1386685631627006000,
-                            1386685631627005999,
-                            1386685631627005998,
-                            1386685631627005997,
-                            1386685631627005996,
-                        ]
-                        for role in member.roles:
-                            if role.id in LEVEL_ROLE_IDS:
-                                await member.remove_roles(role)
 
-                        if new_role:
-                            try:
-                                await member.add_roles(new_role)
-                            except:
-                                pass
+                print(f"[음성] {member.display_name} +{gain}XP (총 {user_data['exp']}XP)")
+                user_data["exp"] += gain
 
+                # ---- (변경) 누적 시간 분기 ----
+                if not is_special:
+                    user_data["voice_minutes"] = user_data.get("voice_minutes", 0) + 1
+
+                user_data["last_activity"] = now_ts
+                new_level = calculate_level(user_data["exp"])
+                if new_level != user_data.get("level", 1):
+                    user_data["level"] = new_level
+                    role_id = get_role_name_for_level(new_level)
+                    new_role = guild.get_role(role_id) if role_id else None
+                    LEVEL_ROLE_IDS = [
+                        1386685631627006000,
+                        1386685631627005999,
+                        1386685631627005998,
+                        1386685631627005997,
+                        1386685631627005996,
+                    ]
+                    for role in member.roles:
+                        if role.id in LEVEL_ROLE_IDS:
+                            await member.remove_roles(role)
+
+                    if new_role:
                         try:
-                            if member.id != guild.owner_id:
-                                await member.edit(nick=generate_nickname(member.display_name, new_level))
+                            await member.add_roles(new_role)
                         except:
                             pass
 
-                        channel = bot.get_channel(LEVELUP_ANNOUNCE_CHANNEL)
-                        if channel:
-                            await channel.send(f"🎉 {member.mention} 님이 Lv.{new_level} 에 도달했습니다! 🎊")
+                    try:
+                        if member.id != guild.owner_id:
+                            await member.edit(nick=generate_nickname(member.display_name, new_level))
+                    except:
+                        pass
 
+                    channel = bot.get_channel(LEVELUP_ANNOUNCE_CHANNEL)
+                    if channel:
+                        await channel.send(f"🎉 {member.mention} 님이 Lv.{new_level} 에 도달했습니다! 🎊")
 
-                    save_user_exp(user_id, user_data)
+                save_user_exp(user_id, user_data)
 
 
 # ---- 반복 VC 미션 ----
