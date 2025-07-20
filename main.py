@@ -10,6 +10,8 @@ from dotenv import load_dotenv
 import firebase_admin
 from firebase_admin import credentials, db
 
+import pytz
+
 # ---- Firebase 초기화 ----
 firebase_key_json = os.getenv("FIREBASE_KEY_JSON")
 try:
@@ -81,6 +83,28 @@ def save_mission_data(data):
 def save_user_mission(user_id, user_mission):
     ref = db.reference("mission_data")
     ref.child(user_id).set(user_mission)
+
+# ---- 출석 데이터 함수 ----
+ATTENDANCE_DB_KEY = "attendance_data"
+KST = pytz.timezone("Asia/Seoul")
+
+def get_attendance_data():
+    ref = db.reference(ATTENDANCE_DB_KEY)
+    return ref.get() or {}
+
+def set_attendance_data(user_id, data):
+    ref = db.reference(ATTENDANCE_DB_KEY)
+    ref.child(user_id).set(data)
+
+def get_today_kst():
+    return datetime.now(KST).strftime("%Y-%m-%d")
+
+def get_week_key_kst(dt):
+    # ISO week: 2025-29 (year-weeknum)
+    return dt.strftime("%Y-%W")
+
+def get_month_key_kst(dt):
+    return dt.strftime("%Y-%m")
     
 # ---- 유틸 ----
 def load_json(path):
@@ -546,6 +570,126 @@ async def 랭킹(ctx):
     )
     if user_rank:
         embed.add_field(name="📍 현재 내 순위", value=user_rank, inline=False)
+    await ctx.send(embed=embed)
+
+
+
+# ---- 출석 ----
+@bot.command()
+async def 출석(ctx):
+    user_id = str(ctx.author.id)
+    now_kst = datetime.now(KST)
+    today_str = now_kst.strftime("%Y-%m-%d")
+    yesterday_str = (now_kst - timedelta(days=1)).strftime("%Y-%m-%d")
+    week_key = get_week_key_kst(now_kst)
+    month_key = get_month_key_kst(now_kst)
+
+    data = get_attendance_data()
+    user_data = data.get(user_id, {
+        "last_date": "",
+        "total_days": 0,
+        "streak": 0,
+        "weekly": {},
+        "monthly": {}
+    })
+
+    # 이미 오늘 출석했는지 확인
+    if user_data.get("last_date") == today_str:
+        tomorrow = now_kst.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+        left = tomorrow - now_kst
+        h, m = divmod(int(left.total_seconds()) // 60, 60)
+        msg = f"이미 오늘 출석했습니다! 내일 00시에 다시 시도해주세요.\n⏰ 남은 시간: {h}시간 {m}분"
+        await ctx.send(msg)
+        return
+
+    # 연속 출석 체크
+    if user_data.get("last_date") == yesterday_str:
+        user_data["streak"] += 1
+    else:
+        if user_data.get("last_date") not in ["", yesterday_str]:
+            await ctx.send("연속 출석이 끊겼습니다! 다시 1일부터 시작합니다. 😥")
+        user_data["streak"] = 1
+
+    user_data["last_date"] = today_str
+    user_data["total_days"] += 1
+
+    # 주간/월간 출석 기록 갱신
+    user_data.setdefault("weekly", {})
+    user_data.setdefault("monthly", {})
+    user_data["weekly"][week_key] = user_data["weekly"].get(week_key, 0) + 1
+    user_data["monthly"][month_key] = user_data["monthly"].get(month_key, 0) + 1
+
+    # 경험치 계산
+    streak = user_data["streak"]
+    exp = 100 + (min(streak, 10) - 1) * 10
+    if exp > 200:
+        exp = 200
+
+    # 경험치 지급
+    exp_data = load_exp_data()
+    user_exp = exp_data.get(user_id, {"exp": 0, "level": 1, "voice_minutes": 0})
+    user_exp["exp"] += exp
+    user_exp["level"] = calculate_level(user_exp["exp"])
+    save_user_exp(user_id, user_exp)
+
+    # 저장
+    set_attendance_data(user_id, user_data)
+
+    # 축하 메시지 (랜덤)
+    congrats = [
+        "🎉 출석 완료! 멋져요!",
+        "👏 오늘도 출석 성공!",
+        "🥳 계속 달려볼까요?",
+        "✨ 출석! 빛나는 하루 되세요!",
+        "🌸 오늘도 힘내세요!",
+        "👍 출석! 좋은 하루!"
+    ]
+    import random
+    msg = (
+        f"{random.choice(congrats)}\n"
+        f"누적 출석: **{user_data['total_days']}일**\n"
+        f"연속 출석: **{user_data['streak']}일**\n"
+        f"경험치: **+{exp} XP**"
+    )
+    await ctx.send(msg)
+
+@bot.command()
+async def 출석랭킹(ctx):
+    """!출석랭킹 : 전체 누적 출석/연속 출석 랭킹"""
+    data = get_attendance_data()
+    ranking = []
+    for uid, ud in data.items():
+        cnt = ud.get("total_days", 0)
+        streak = ud.get("streak", 1)
+        ranking.append((uid, cnt, streak))
+
+    # 정렬: 누적 출석 내림차순, 연속 출석 내림차순
+    ranking.sort(key=lambda x: (-x[1], -x[2]))
+
+    desc = ""
+    for i, row in enumerate(ranking[:10], 1):
+        try:
+            member = await ctx.guild.fetch_member(int(row[0]))
+            name = member.display_name
+        except:
+            name = "Unknown"
+        desc += f"{i}위. {name} - 누적 {row[1]}일 / 연속 {row[2]}일\n"
+
+    # 내 순위
+    my_id = str(ctx.author.id)
+    my_rank = None
+    for i, row in enumerate(ranking, 1):
+        if row[0] == my_id:
+            my_rank = f"당신의 순위: {i}위 (누적 {row[1]}일 / 연속 {row[2]}일)"
+            break
+
+    embed = discord.Embed(
+        title="🏅 전체 출석 랭킹",
+        description=desc or "출석 기록이 없습니다.",
+        color=discord.Color.blue()
+    )
+    if my_rank:
+        embed.add_field(name="📍 내 순위", value=my_rank, inline=False)
     await ctx.send(embed=embed)
 
 # ---- 실행 ----
