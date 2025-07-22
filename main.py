@@ -169,6 +169,8 @@ def generate_nickname(base, level):
     tag = f" [ Lv . {level} ]"
     nickname = clean + tag
     return nickname[:32]
+from datetime import datetime, timedelta
+
 def get_week_key_kst(dt: datetime) -> str:
     """
     주 단위 키를 ISO 형식으로 반환합니다. 
