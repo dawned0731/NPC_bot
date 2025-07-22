@@ -11,7 +11,7 @@ import firebase_admin
 from firebase_admin import credentials, db
 import pytz
 import asyncio
-from datetime import datetime, timedelta, time as dtime
+from datetime import time as dtime
 
 
 
@@ -326,7 +326,7 @@ async def inactive_user_log_task():
                     await log_channel.send(f"{member.display_name} 님 5일 미접 상태입니다.")
 
 
-@tasks.loop(time=dtime(hour=0, minute=0), timezone=KST)
+@tasks.loop(time=dtime(hour=15, minute=0))
 
 async def reset_daily_missions():
     """일일 미션 데이터 초기화 (로컬 및 DB)"""
