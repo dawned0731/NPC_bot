@@ -275,6 +275,7 @@ bot = commands.Bot(
 # ---- on_ready ----
 @bot.event
 async def on_ready():
+    bot.tree.add_command(hidden_quest, override=True)
     print(f"✅ {bot.user} 온라인")
     # 슬래시 커맨드 동기화
     try:
