@@ -252,8 +252,6 @@ async def on_ready():
     try:
         synced = await bot.tree.sync()
         print(f"🌐 전역 슬래시 커맨드 {len(synced)}개 동기화 완료")
-            await bot.tree.sync()
-        print("🔄 슬래시 커맨드 동기화 완료")
     except Exception as e:
         # 환경 변수 누락 혹은 429 에러 등 처리
         print(f"❌ 슬래시 커맨드 동기화 실패: {e}")
