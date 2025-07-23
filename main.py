@@ -275,7 +275,7 @@ bot = commands.Bot(
 # ---- on_ready ----
 @bot.event
 async def on_ready():
-    bot.tree.add_command(hidden_quest, override=True)
+        bot.tree.add_command(hidden_quest, override=True)
     await bot.tree.sync(guild=discord.Object(id=GUILD_ID))
     print(f"✅ {bot.user} 온라인")
     # 슬래시 커맨드 동기화
@@ -701,7 +701,7 @@ async def 리셋(inter: discord.Interaction, 번호: int):
         ephemeral=True
     )
 
-bot.tree.add_command(hidden_quest, override=True)
+    bot.tree.add_command(hidden_quest, override=True)
     await bot.tree.sync(guild=discord.Object(id=GUILD_ID))
 
 # ---- 기타 슬래시 커맨드 핸들러 (/정보, /퀘스트, /랭킹, /출석, /출석랭킹) ----
