@@ -520,7 +520,7 @@ async def on_message(message):
             mission_data[uid] = user_m
             save_user_mission(uid, user_m)
 
-            except Exception as e:
+                except Exception as e:
         print(f"❌ on_message 처리 중 오류: {e}")
 
     # ---- 히든 퀘스트 진행 처리 ----
