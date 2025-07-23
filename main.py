@@ -252,7 +252,6 @@ async def on_ready():
     try:
         synced = await bot.tree.sync()
         print(f"🌐 전역 슬래시 커맨드 {len(synced)}개 동기화 완료")
-        else:
             await bot.tree.sync()
         print("🔄 슬래시 커맨드 동기화 완료")
     except Exception as e:
