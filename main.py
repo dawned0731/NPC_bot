@@ -520,7 +520,10 @@ async def on_message(message):
             mission_data[uid] = user_m
             save_user_mission(uid, user_m)
 
-        # ---- 히든 퀘스트 진행 처리 ----
+            except Exception as e:
+        print(f"❌ on_message 처리 중 오류: {e}")
+
+    # ---- 히든 퀘스트 진행 처리 ----
         # 메시지에 '아니' 키워드가 포함된 경우에만 트랜잭션 실행
         if "아니" in message.content:
             ref_hq = db.reference(f"{HIDDEN_QUEST_KEY}/1")
