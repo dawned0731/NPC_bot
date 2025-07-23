@@ -766,9 +766,7 @@ async def hidden_quest_list(interaction: discord.Interaction):
         else:
             lines.append(f"{qid}. ???")
 
-    await interaction.response.send_message("
-
-".join(lines))
+    await interaction.response.send_message("\n\n".join(lines))
 
                                             
 @bot.tree.command(name="정보", description="자신의 레벨 및 경험치 정보를 확인합니다.")
