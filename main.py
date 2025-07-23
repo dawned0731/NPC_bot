@@ -637,7 +637,6 @@ async def on_message(message):
 
 # ---- 히든 퀘스트 관리 커맨드 ----
 hidden_quest = app_commands.Group(
-    guild_ids=[GUILD_ID],
     name="히든관리",
     description="히든 퀘스트 관리"
 )
