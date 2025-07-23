@@ -662,7 +662,7 @@ async def 상태(inter: discord.Interaction, 번호: int):
     winner = data.get("winner")
     my_count = data.get("counts", {}).get(str(inter.user.id), 0)
 
-                        name = QUEST_NAMES.get(번호, f"퀘스트 {번호}")
+    name = QUEST_NAMES.get(번호, f"퀘스트 {번호}")
     msg = f"""🔎 히든 퀘스트 [{name}] 상태
 📅 마지막 초기화: {last_date}
 ✅ 완료 여부: {'완료' if completed else '미완료'}
@@ -762,10 +762,7 @@ async def hidden_quest_list(interaction: discord.Interaction):
             winner = f"<@{q.get('winner')}>" if q.get("winner") else "알 수 없음"
             completed_at = q.get("completed_at", "알 수 없음")
             condition = QUEST_CONDITIONS.get(qid, "조건 비공개")
-            lines.append(f"{qid}. {name}
-달성자: {winner}
-완료 시각: {completed_at}
-📘 조건: {condition}")
+            lines.append(f"{qid}. {name}\n달성자: {winner}\n완료 시각: {completed_at}\n📘 조건: {condition}")
         else:
             lines.append(f"{qid}. ???")
 
