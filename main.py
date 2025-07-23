@@ -275,7 +275,7 @@ bot = commands.Bot(
 # ---- on_ready ----
 @bot.event
 async def on_ready():
-        bot.tree.add_command(hidden_quest, override=True)
+    bot.tree.add_command(hidden_quest, override=True)
     await bot.tree.sync(guild=discord.Object(id=GUILD_ID))
     print(f"✅ {bot.user} 온라인")
     # 슬래시 커맨드 동기화
@@ -966,4 +966,3 @@ threading.Thread(target=lambda: app.run(host="0.0.0.0", port=10000)).start()
 
 # Discord Bot 실행
 bot.run(TOKEN)
-
