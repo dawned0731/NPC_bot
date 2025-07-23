@@ -250,8 +250,8 @@ async def on_ready():
     print(f"✅ {bot.user} 온라인")
     # 슬래시 커맨드 동기화
     try:
-        if GUILD_ID:
-            await bot.tree.sync(guild=discord.Object(id=GUILD_ID))
+        synced = await bot.tree.sync()
+        print(f"🌐 전역 슬래시 커맨드 {len(synced)}개 동기화 완료")
         else:
             await bot.tree.sync()
         print("🔄 슬래시 커맨드 동기화 완료")
@@ -275,7 +275,7 @@ async def on_member_update(before, after):
 
     # 특정 스레드 역할이 부여되면 환영 메시지
     if THREAD_ROLE_ID in added:
-        channel = bot.get_channel(THREAD_ROLE_CHANNEL_ID)
+        channel = bot.get_channel(TARGET_TEXT_CHANNEL_ID)
         if channel:
             await channel.send(
                 f"환영합니다 {after.mention} 님! '사계절, 그 사이' 서버입니다.\n"
