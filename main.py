@@ -13,8 +13,6 @@ import pytz
 import asyncio
 from datetime import time as dtime
 
-
-
 # ---- Firebase 초기화 ----
 # 환경 변수에서 Firebase 키(JSON) 로드
 load_dotenv()
@@ -60,6 +58,17 @@ REPEAT_VC_REQUIRED_MINUTES = 15
 REPEAT_VC_MIN_PEOPLE = 5
 SPECIAL_VC_CATEGORY_IDS = [1386685633820495991]
 ATTENDANCE_DB_KEY = "attendance_data"
+HIDDEN_QUEST_KEY = "hidden_quest_data"  # 히든 퀘스트 저장 키
+quest_id = 1
+QUEST_NAMES = {1: "아니시에이팅", 2: "감사한 마음", 3: "파푸 애호가"}
+
+QUEST_CONDITIONS = {
+    1: "메시지에 '아니'를 24시간 동안 50회 이상 포함하면 달성됩니다.",
+    2: "메시지에 '감사합니다'를 24시간 동안 30회 이상 포함하면 달성됩니다.",
+    3: "메시지에 '파푸'를 24시간 동안 30회 이상 포함하면 달성됩니다."
+}  # 히든 퀘스트 이름 매핑
+
+VALID_QUEST_IDS = {1, 2, 3}  # 사용할 히든퀘스트 번호 목록
 
 # KST 타임존 객체
 KST = pytz.timezone("Asia/Seoul")
@@ -190,6 +199,25 @@ def get_month_key_kst(dt: datetime) -> str:
 
 # 최근 역할·닉네임 업데이트한 유저를 추적해 rate-limit 방지
 recent_role_updates: set[int] = set()
+
+def hidden_quest_txn(cur):
+    # 처음 호출 시 기본 구조 생성
+    if cur is None:
+        cur = {
+            "last_date": datetime.now(KST).strftime("%Y-%m-%d"),
+            "counts": {},
+            "timestamps": {},
+            "completed": False,
+            "winner": None
+        }
+
+    today = datetime.now(KST).strftime("%Y-%m-%d")
+    if cur["last_date"] != today:
+        cur["last_date"] = today
+        cur["counts"] = {}
+        cur["timestamps"] = {}
+
+    return cur
 
 
 # ─── 데바운스 적용 헬퍼 함수 추가 ────────────────────────────
@@ -491,17 +519,185 @@ async def on_message(message):
 
             mission_data[uid] = user_m
             save_user_mission(uid, user_m)
-            try:
-                missions = load_mission_data()
-                save_json(MISSION_PATH, missions)
-            except Exception as e:
-                print(f"❌ 미션 로컬 백업 실패: {e}")
 
-    except Exception as e:
-        print(f"❌ on_message 에러: {e}")
+        # ---- 히든 퀘스트 진행 처리 ----
+        # 메시지에 '아니' 키워드가 포함된 경우에만 트랜잭션 실행
+        if "아니" in message.content:
+            ref_hq = db.reference(f"{HIDDEN_QUEST_KEY}/1")
+            def txn(cur):
+                cur = hidden_quest_txn(cur)
+                cnts = cur.get("counts", {})
+                if not cur["completed"] and "아니" in message.content:
+                    uid = str(message.author.id)
+                    now = datetime.now(KST)
+                    ts_map = cur.get("timestamps", {})
+                    first_time_str = ts_map.get(uid)
+
+                    if not first_time_str:
+                        ts_map[uid] = now.isoformat()
+                        cur["timestamps"] = ts_map
+                    else:
+                        first_time = datetime.fromisoformat(first_time_str)
+                        if now - first_time > timedelta(hours=24):
+                            cur["timestamps"][uid] = now.isoformat()
+                            cnts[uid] = 1
+                        else:
+                            cnts[uid] = cnts.get(uid, 0) + 1
+                    cur["counts"] = cnts
+                    if cnts[uid] >= 50:
+                        cur["completed"] = True
+                        cur["winner"] = uid
+                        cur["completed_at"] = datetime.now(KST).strftime("%Y. %-m. %-d %H:%M")
+                return cur
+            result = ref_hq.transaction(txn)
+            if result.get("completed") and result.get("winner") == str(message.author.id):
+                await message.channel.send(
+                    f"🎉 {message.author.mention}님, 히든 퀘스트 [아니시에이팅]을(를) 완료하셨습니다!"
+                )
+
+        # 메시지에 '감사합니다' 키워드가 포함된 경우에만 트랜잭션 실행
+        if "감사합니다" in message.content:
+            ref_hq = db.reference(f"{HIDDEN_QUEST_KEY}/2")
+            def txn2(cur):
+                cur = hidden_quest_txn(cur)
+                cnts = cur.get("counts", {})
+                if not cur["completed"] and "감사합니다" in message.content:
+                    uid = str(message.author.id)
+                    now = datetime.now(KST)
+                    ts_map = cur.get("timestamps", {})
+                    first_time_str = ts_map.get(uid)
+
+                    if not first_time_str:
+                        ts_map[uid] = now.isoformat()
+                        cur["timestamps"] = ts_map
+                    else:
+                        first_time = datetime.fromisoformat(first_time_str)
+                        if now - first_time > timedelta(hours=24):
+                            cur["timestamps"][uid] = now.isoformat()
+                            cnts[uid] = 1
+                        else:
+                            cnts[uid] = cnts.get(uid, 0) + 1
+                    cur["counts"] = cnts
+                    if cnts[uid] >= 30:
+                        cur["completed"] = True
+                        cur["winner"] = uid
+                        cur["completed_at"] = datetime.now(KST).strftime("%Y. %-m. %-d %H:%M")
+                return cur
+            result = ref_hq.transaction(txn2)
+            if result.get("completed") and result.get("winner") == str(message.author.id):
+                await message.channel.send(
+                    f"🎉 {message.author.mention}님, 히든 퀘스트 [감사한 마음] 달성!"
+                )
+
+      
+        # 메시지에 '파푸' 키워드가 포함된 경우에만 트랜잭션 실행
+        if "파푸" in message.content:
+            ref_hq = db.reference(f"{HIDDEN_QUEST_KEY}/3")
+            def txn3(cur):
+                cur = hidden_quest_txn(cur)
+                cnts = cur.get("counts", {})
+                if not cur["completed"] and "파푸" in message.content:
+                    uid = str(message.author.id)
+                    now = datetime.now(KST)
+                    ts_map = cur.get("timestamps", {})
+                    first_time_str = ts_map.get(uid)
+
+                    if not first_time_str:
+                        ts_map[uid] = now.isoformat()
+                        cur["timestamps"] = ts_map
+                        cnts[uid] = 1
+                    else:
+                        first_time = datetime.fromisoformat(first_time_str)
+                        if now - first_time > timedelta(hours=24):
+                            ts_map[uid] = now.isoformat()
+                            cur["timestamps"] = ts_map
+                            cnts[uid] = 1
+                        else:
+                            cnts[uid] = cnts.get(uid, 0) + 1
+
+                    cur["counts"] = cnts
+
+                    if cnts[uid] >= 45:
+                        cur["completed"] = True
+                        cur["winner"] = uid
+                        cur["completed_at"] = datetime.now(KST).strftime("%Y. %-m. %-d %H:%M")
+                return cur
+            result = ref_hq.transaction(txn3)
+            if result.get("completed") and result.get("winner") == str(message.author.id):
+                await message.channel.send(
+                    f"🎉 {message.author.mention}님, 히든 퀘스트 [파푸 애호가] 달성!"
+                )
 
 
 # ---- 슬래시 관리자 명령어 ----
+
+# ---- 히든 퀘스트 관리 커맨드 ----
+hidden_quest = app_commands.Group(
+    name="히든관리",
+    description="히든 퀘스트 관리"
+)
+
+@hidden_quest.command(
+    name="상태",
+    description="지정한 히든퀘스트 상태 조회"
+)
+@app_commands.describe(
+    번호="조회할 히든퀘스트 번호 (정수)"
+)
+@app_commands.default_permissions(administrator=True)
+async def 상태(inter: discord.Interaction, 번호: int):
+    if 번호 not in VALID_QUEST_IDS:
+        return await inter.response.send_message(
+            f"❌ 유효하지 않은 퀘스트 번호입니다. 사용 가능한 번호: {sorted(VALID_QUEST_IDS)}",
+            ephemeral=True
+        )
+
+    key = f"{HIDDEN_QUEST_KEY}/{번호}"
+    data = db.reference(key).get() or {}
+    last_date = data.get("last_date", "-")
+    completed = data.get("completed", False)
+    winner = data.get("winner")
+    my_count = data.get("counts", {}).get(str(inter.user.id), 0)
+
+                        name = QUEST_NAMES.get(번호, f"퀘스트 {번호}")
+    msg = f"""🔎 히든 퀘스트 [{name}] 상태
+📅 마지막 초기화: {last_date}
+✅ 완료 여부: {'완료' if completed else '미완료'}
+🏆 달성자: {f'<@{winner}>' if winner else '없음'}
+📊 내 카운트: {my_count} / 50"""
+    await inter.response.send_message(msg, ephemeral=True)
+
+@hidden_quest.command(
+    name="리셋",
+    description="지정한 히든퀘스트 번호만 초기화합니다."
+)
+@app_commands.describe(
+    번호="초기화할 히든퀘스트 번호 (정수)"
+)
+@app_commands.default_permissions(administrator=True)
+async def 리셋(inter: discord.Interaction, 번호: int):
+    if 번호 not in VALID_QUEST_IDS:
+        return await inter.response.send_message(
+            f"❌ 유효하지 않은 퀘스트 번호입니다. 사용 가능한 번호: {sorted(VALID_QUEST_IDS)}",
+            ephemeral=True
+        )
+
+    key = f"{HIDDEN_QUEST_KEY}/{번호}"
+    today = datetime.now(KST).strftime("%Y-%m-%d")
+    db.reference(key).set({
+        "last_date": today,
+        "counts": {},
+        "completed": False,
+        "winner": None
+    })
+    await inter.response.send_message(
+        f"🔄 히든 퀘스트 #{번호}를 초기화했습니다.",
+        ephemeral=True
+    )
+
+bot.tree.add_command(hidden_quest, override=True)
+
+# ---- 기타 슬래시 커맨드 핸들러 (/정보, /퀘스트, /랭킹, /출석, /출석랭킹) ----
 @app_commands.default_permissions(administrator=True)
 @bot.tree.command(name="경험치지급", description="유저에게 경험치를 지급합니다.")
 async def grant_xp(interaction: discord.Interaction, member: discord.Member, amount: int):
@@ -522,7 +718,7 @@ async def grant_xp(interaction: discord.Interaction, member: discord.Member, amo
             await ch_log.send(f"🎉 {member.mention} 님이 Lv.{new_level} 에 도달했습니다! 🎊")
 
     save_user_exp(uid, user_data)
-    await interaction.response.send_message(f"✅ {member.mention}에게 경험치 {amount}XP 지급 완료!")
+    await interaction.response.send_message(f"✅ {member.mention}에게 경험치 {amount}XP 지급 완료!", ephemeral=True)
 
 
 @app_commands.default_permissions(administrator=True)
@@ -547,11 +743,34 @@ async def deduct_xp(
     # 역할·닉네임 변경 (데바운스 적용)
     await update_role_and_nick(member, user_data["level"])
 
-    await interaction.response.send_message(
-        f"✅ {member.mention}에게서 경험치 {amount}XP 차감 완료!"
-    )
+    await interaction.response.send_message(f"✅ {member.mention}에게서 경험치 {amount}XP 차감 완료!", ephemeral=True)
 # ---- 기타 슬래시 커맨드 핸들러 (/정보, /퀘스트, /랭킹, /출석, /출석랭킹) ----
 
+  # 히든 퀘스트 목록 조회 명령어 (일반 사용자용)
+@bot.tree.command(name="히든퀘스트", description="히든 퀘스트 목록을 확인합니다.")
+async def hidden_quest_list(interaction: discord.Interaction):
+    data = db.reference(HIDDEN_QUEST_KEY).get() or {}
+    lines = ["🕵️ 히든 퀘스트"]
+
+    for qid in sorted(VALID_QUEST_IDS):
+        q = data.get(str(qid), {})
+        if q.get("completed"):
+            name = QUEST_NAMES.get(qid, f"퀘스트 {qid}")
+            winner = f"<@{q.get('winner')}>" if q.get("winner") else "알 수 없음"
+            completed_at = q.get("completed_at", "알 수 없음")
+            condition = QUEST_CONDITIONS.get(qid, "조건 비공개")
+            lines.append(f"{qid}. {name}
+달성자: {winner}
+완료 시각: {completed_at}
+📘 조건: {condition}")
+        else:
+            lines.append(f"{qid}. ???")
+
+    await interaction.response.send_message("
+
+".join(lines))
+
+                                            
 @bot.tree.command(name="정보", description="자신의 레벨 및 경험치 정보를 확인합니다.")
 async def info(interaction: discord.Interaction):
     uid = str(interaction.user.id)
@@ -559,6 +778,9 @@ async def info(interaction: discord.Interaction):
     user = exp_data.get(uid, {"exp": 0, "level": 1, "voice_minutes": 0})
     current_exp = user["exp"]
     lvl = calculate_level(current_exp)
+    if lvl != user["level"]:
+        user["level"] = lvl
+        save_user_exp(uid, user)
     # 이전 !정보 임베드 로직 그대로 사용
     if lvl > 1:
         prev_req = ((lvl - 1) * 30 + (lvl - 1) ** 2 * 7) * 18
@@ -584,14 +806,27 @@ async def quest(interaction: discord.Interaction):
     um = missions.get(uid, {"date": today, "text": {"count": 0, "completed": False}, "repeat_vc": {"minutes": 0}})
     if um.get("date") != today:
         um = {"date": today, "text": {"count": 0, "completed": False}, "repeat_vc": {"minutes": 0}}
+
     text_count = um["text"]["count"]
-    text_status = "✅ 완료" if um["text"]["completed"] else f"{text_count} / {MISSION_REQUIRED_MESSAGES} → 미완료"
+    text_status = (
+      f"진행도: {text_count} / {MISSION_REQUIRED_MESSAGES}\n"
+      f"상태: {'✅ 완료' if um['text']['completed'] else '❌ 미완료'}"
+    )
+  
     vc_minutes = um["repeat_vc"]["minutes"]
     vc_rewards = vc_minutes // REPEAT_VC_REQUIRED_MINUTES
-    vc_status = f"{vc_minutes}분 → {vc_rewards}회 보상 지급"
+    vc_status = f"누적 참여: {vc_minutes}분\n보상 횟수: {vc_rewards}회 지급"
+
+    # 출석 여부
+    attendance = get_attendance_data().get(uid, {})
+    last_date = attendance.get("last_date", "")
+    attended = last_date == today
+    attendance_status = f"상태: {'✅ 출석 완료' if attended else '❌ 출석 안됨'}"
+
     embed = discord.Embed(title="📜 퀘스트 현황", color=discord.Color.green())
     embed.add_field(name="🗨️ 텍스트 미션", value=text_status, inline=False)
-    embed.add_field(name="🔁 반복 VC 미션", value=vc_status, inline=False)
+    embed.add_field(name="📞 5인 이상 통화방 참여 미션", value=vc_status, inline=False)
+    embed.add_field(name="🗓️ 출석", value=attendance_status, inline=False)
     await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name="랭킹", description="경험치 랭킹을 확인합니다.")
@@ -655,7 +890,27 @@ async def attend(interaction: discord.Interaction):
     ue["level"] = calculate_level(ue["exp"])
     save_user_exp(uid, ue)
     set_attendance_data(uid, ud)
-    msg = f"🎉 누적 {ud['total_days']}일 / 연속 {ud['streak']}일 출석! +{gain}XP"
+    first_attend = ud["total_days"] == 1
+    streak_reset = ud["streak"] == 1 and ud["last_date"] != yesterday
+
+    if first_attend:
+        intro = "✨ 출석! 빛나는 하루 되세요!"
+    elif streak_reset:
+        intro = "😥 연속 출석이 끊겼습니다! 다시 1일부터 시작합니다."
+    else:
+        intro = random.choice([
+            "🎉 출석 완료! 멋져요!",
+            "🥳 계속 달려볼까요?",
+            "🌞 좋은 하루의 시작이에요!",
+            "💪 출석 성공! 오늘도 파이팅!"
+        ])
+
+    msg = (
+      f"{intro}\n"
+      f"누적 출석: {ud['total_days']}일\n"
+      f"연속 출석: {ud['streak']}일\n"
+      f"경험치: +{gain} XP"
+      )
     await interaction.response.send_message(msg)
 
 @bot.tree.command(name="출석랭킹", description="출석 랭킹을 확인합니다.")
@@ -709,3 +964,4 @@ threading.Thread(target=lambda: app.run(host="0.0.0.0", port=10000)).start()
 
 # Discord Bot 실행
 bot.run(TOKEN)
+
