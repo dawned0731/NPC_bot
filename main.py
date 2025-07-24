@@ -626,10 +626,14 @@ async def on_message(message):
 # ---- 슬래시 관리자 명령어 ----
 
 # ---- 히든 퀘스트 관리 커맨드 ----
-hidden_quest = app_commands.Group(
-    name="히든관리",
-    description="히든 퀘스트 관리",
-    default_permissions=discord.Permissions(administrator=True)
+try:
+    hidden_quest = app_commands.Group(
+        name="히든관리",
+        description="히든 퀘스트 관리",
+        default_permissions=discord.Permissions(administrator=True)
+    )
+finally:
+    pass
 )
 
 @hidden_quest.command(
