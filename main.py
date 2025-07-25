@@ -1,4 +1,3 @@
-
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
@@ -65,8 +64,8 @@ QUEST_NAMES = {1: "아니시에이팅", 2: "감사한 마음", 3: "파푸 애호
 
 QUEST_CONDITIONS = {
     1: "메시지에 '아니'를 24시간 동안 50회 이상 포함하면 달성됩니다.",
-    2: "메시지에 '감사합니다'를 24시간 동안 30회 이상 포함하면 달성됩니다.",
-    3: "메시지에 '파푸'를 24시간 동안 30회 이상 포함하면 달성됩니다."
+    2: "메시지에 '감사합니다'를 24시간 동안 50회 이상 포함하면 달성됩니다.",
+    3: "메시지에 '파푸'를 24시간 동안 45회 이상 포함하면 달성됩니다."
 }  # 히든 퀘스트 이름 매핑
 
 VALID_QUEST_IDS = {1, 2, 3}  # 사용할 히든퀘스트 번호 목록
@@ -276,6 +275,8 @@ bot = commands.Bot(
 # ---- on_ready ----
 @bot.event
 async def on_ready():
+    bot.tree.add_command(hidden_quest, override=True)
+
     print(f"✅ {bot.user} 온라인")
     # 슬래시 커맨드 동기화
     try:
@@ -521,12 +522,16 @@ async def on_message(message):
             mission_data[uid] = user_m
             save_user_mission(uid, user_m)
 
-        # ---- 히든 퀘스트 진행 처리 ----
+    except Exception as e:
+        print(f"❌ on_message 처리 중 오류: {e}")
+
+    # ---- 히든 퀘스트 진행 처리 ----
         # 메시지에 '아니' 키워드가 포함된 경우에만 트랜잭션 실행
         if "아니" in message.content:
             ref_hq = db.reference(f"{HIDDEN_QUEST_KEY}/1")
             def txn(cur):
                 cur = hidden_quest_txn(cur)
+                cnts = cur.get("counts", {})
                 if not cur["completed"] and "아니" in message.content:
                     uid = str(message.author.id)
                     now = datetime.now(KST)
@@ -540,9 +545,9 @@ async def on_message(message):
                         first_time = datetime.fromisoformat(first_time_str)
                         if now - first_time > timedelta(hours=24):
                             cur["timestamps"][uid] = now.isoformat()
-                            cur["counts"][uid] = 1
+                            cnts[uid] = 1
                         else:
-                            cur["counts"][uid] = cur.get("counts", {}).get(uid, 0) + 1
+                            cnts[uid] = cnts.get(uid, 0) + 1
                     cur["counts"] = cnts
                     if cnts[uid] >= 50:
                         cur["completed"] = True
@@ -560,6 +565,7 @@ async def on_message(message):
             ref_hq = db.reference(f"{HIDDEN_QUEST_KEY}/2")
             def txn2(cur):
                 cur = hidden_quest_txn(cur)
+                cnts = cur.get("counts", {})
                 if not cur["completed"] and "감사합니다" in message.content:
                     uid = str(message.author.id)
                     now = datetime.now(KST)
@@ -573,11 +579,11 @@ async def on_message(message):
                         first_time = datetime.fromisoformat(first_time_str)
                         if now - first_time > timedelta(hours=24):
                             cur["timestamps"][uid] = now.isoformat()
-                            cur["counts"][uid] = 1
+                            cnts[uid] = 1
                         else:
-                            cur["counts"][uid] = cur.get("counts", {}).get(uid, 0) + 1
+                            cnts[uid] = cnts.get(uid, 0) + 1
                     cur["counts"] = cnts
-                    if cnts[uid] >= 30:
+                    if cnts[uid] >= 50:
                         cur["completed"] = True
                         cur["winner"] = uid
                         cur["completed_at"] = datetime.now(KST).strftime("%Y. %-m. %-d %H:%M")
@@ -594,6 +600,7 @@ async def on_message(message):
             ref_hq = db.reference(f"{HIDDEN_QUEST_KEY}/3")
             def txn3(cur):
                 cur = hidden_quest_txn(cur)
+                cnts = cur.get("counts", {})
                 if not cur["completed"] and "파푸" in message.content:
                     uid = str(message.author.id)
                     now = datetime.now(KST)
@@ -603,16 +610,19 @@ async def on_message(message):
                     if not first_time_str:
                         ts_map[uid] = now.isoformat()
                         cur["timestamps"] = ts_map
-                        cur["counts"][uid] = 1
+                        cnts[uid] = 1
                     else:
                         first_time = datetime.fromisoformat(first_time_str)
                         if now - first_time > timedelta(hours=24):
-                            cur["timestamps"][uid] = now.isoformat()
-                            cur["counts"][uid] = 1
+                            ts_map[uid] = now.isoformat()
+                            cur["timestamps"] = ts_map
+                            cnts[uid] = 1
                         else:
-                            cur["counts"][uid] = cur.get("counts", {}).get(uid, 0) + 1
+                            cnts[uid] = cnts.get(uid, 0) + 1
 
-                    if cur["counts"][uid] >= 45:
+                    cur["counts"] = cnts
+
+                    if cnts[uid] >= 45:
                         cur["completed"] = True
                         cur["winner"] = uid
                         cur["completed_at"] = datetime.now(KST).strftime("%Y. %-m. %-d %H:%M")
@@ -627,6 +637,7 @@ async def on_message(message):
 # ---- 슬래시 관리자 명령어 ----
 
 # ---- 히든 퀘스트 관리 커맨드 ----
+
 hidden_quest = app_commands.Group(
     name="히든관리",
     description="히든 퀘스트 관리"
@@ -654,8 +665,8 @@ async def 상태(inter: discord.Interaction, 번호: int):
     winner = data.get("winner")
     my_count = data.get("counts", {}).get(str(inter.user.id), 0)
 
-                name = QUEST_NAMES.get(번호, f"퀘스트 {번호}")
-        msg = f"""🔎 히든 퀘스트 [{name}] 상태
+    name = QUEST_NAMES.get(번호, f"퀘스트 {번호}")
+    msg = f"""🔎 히든 퀘스트 [{name}] 상태
 📅 마지막 초기화: {last_date}
 ✅ 완료 여부: {'완료' if completed else '미완료'}
 🏆 달성자: {f'<@{winner}>' if winner else '없음'}
@@ -690,7 +701,7 @@ async def 리셋(inter: discord.Interaction, 번호: int):
         ephemeral=True
     )
 
-bot.tree.add_command(hidden_quest, override=True)
+    
 
 # ---- 기타 슬래시 커맨드 핸들러 (/정보, /퀘스트, /랭킹, /출석, /출석랭킹) ----
 @app_commands.default_permissions(administrator=True)
@@ -744,9 +755,7 @@ async def deduct_xp(
   # 히든 퀘스트 목록 조회 명령어 (일반 사용자용)
 @bot.tree.command(name="히든퀘스트", description="히든 퀘스트 목록을 확인합니다.")
 async def hidden_quest_list(interaction: discord.Interaction):
-    data = db.reference(HIDDEN_QUEST_KEY).get()
-    if not isinstance(data, dict):
-        data = {}
+    data = db.reference(HIDDEN_QUEST_KEY).get() or {}
     lines = ["🕵️ 히든 퀘스트"]
 
     for qid in sorted(VALID_QUEST_IDS):
@@ -756,16 +765,11 @@ async def hidden_quest_list(interaction: discord.Interaction):
             winner = f"<@{q.get('winner')}>" if q.get("winner") else "알 수 없음"
             completed_at = q.get("completed_at", "알 수 없음")
             condition = QUEST_CONDITIONS.get(qid, "조건 비공개")
-            lines.append(f"{qid}. {name}
-달성자: {winner}
-완료 시각: {completed_at}
-📘 조건: {condition}")
+            lines.append(f"{qid}. {name}\n달성자: {winner}\n완료 시각: {completed_at}\n📘 조건: {condition}")
         else:
             lines.append(f"{qid}. ???")
 
-    await interaction.response.send_message("
-
-".join(lines))
+    await interaction.response.send_message("\n\n".join(lines))
 
                                             
 @bot.tree.command(name="정보", description="자신의 레벨 및 경험치 정보를 확인합니다.")
@@ -775,6 +779,9 @@ async def info(interaction: discord.Interaction):
     user = exp_data.get(uid, {"exp": 0, "level": 1, "voice_minutes": 0})
     current_exp = user["exp"]
     lvl = calculate_level(current_exp)
+    if lvl != user["level"]:
+        user["level"] = lvl
+        save_user_exp(uid, user)
     # 이전 !정보 임베드 로직 그대로 사용
     if lvl > 1:
         prev_req = ((lvl - 1) * 30 + (lvl - 1) ** 2 * 7) * 18
@@ -958,5 +965,4 @@ threading.Thread(target=lambda: app.run(host="0.0.0.0", port=10000)).start()
 
 # Discord Bot 실행
 bot.run(TOKEN)
-
 
