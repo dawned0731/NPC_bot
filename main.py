@@ -755,7 +755,8 @@ async def deduct_xp(
   # 히든 퀘스트 목록 조회 명령어 (일반 사용자용)
 @bot.tree.command(name="히든퀘스트", description="히든 퀘스트 목록을 확인합니다.")
 async def hidden_quest_list(interaction: discord.Interaction):
-    data = db.reference(HIDDEN_QUEST_KEY).get() or {}
+    raw = db.reference(HIDDEN_QUEST_KEY).get()
+    data = raw if isinstance(raw, dict) else {}
     lines = ["🕵️ 히든 퀘스트"]
 
     for qid in sorted(VALID_QUEST_IDS):
