@@ -634,7 +634,7 @@ try:
     )
 finally:
     pass
-)
+
 
 @hidden_quest.command(
     name="상태",
