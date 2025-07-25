@@ -1,3 +1,4 @@
+
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
@@ -632,9 +633,8 @@ try:
         description="히든 퀘스트 관리",
         default_permissions=discord.Permissions(administrator=True)
     )
-finally:
-    pass
-
+except Exception as e:
+    print(f"❌ 히든 퀘스트 그룹 생성 실패: {e}")
 
 @hidden_quest.command(
     name="상태",
@@ -962,4 +962,5 @@ threading.Thread(target=lambda: app.run(host="0.0.0.0", port=10000)).start()
 
 # Discord Bot 실행
 bot.run(TOKEN)
+
 
