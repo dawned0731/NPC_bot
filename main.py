@@ -629,6 +629,8 @@ async def on_message(message):
 # ---- 히든 퀘스트 관리 커맨드 ----
 try:
     hidden_quest = app_commands.Group(
+except Exception as e:
+    print(f"❌ 히든 퀘스트 그룹 생성 실패: {e}")
         name="히든관리",
         description="히든 퀘스트 관리",
         default_permissions=discord.Permissions(administrator=True)
