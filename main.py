@@ -343,16 +343,19 @@ async def inactive_user_log_task():
     if not log_channel:
         return
 
+    missing_users = []
     for guild in bot.guilds:
         for member in guild.members:
             if member.bot:
                 continue
             user = exp_data.get(str(member.id))
             if user and user.get("last_activity"):
-                # UTC 기준 timestamp 변환
                 last_active = datetime.fromtimestamp(user["last_activity"], KST)
                 if last_active < threshold:
                     await log_channel.send(f"{member.display_name} 님 5일 미접 상태입니다.")
+                    missing_users.append(member.display_name)
+    if not missing_users:
+        await log_channel.send("✅ 현재 5일 이상 미접속 중인 사용자가 없습니다.")
 
 
 @tasks.loop(time=dtime(hour=15, minute=0))
@@ -704,6 +707,36 @@ async def 리셋(inter: discord.Interaction, 번호: int):
     
 
 # ---- 기타 슬래시 커맨드 핸들러 (/정보, /퀘스트, /랭킹, /출석, /출석랭킹) ----
+
+@app_commands.default_permissions(administrator=True)
+@bot.tree.command(name="정보분석", description="서버원의 경험치 및 마지막 활동일 분석")
+@app_commands.describe(member="분석할 서버원")
+async def analyze_info(interaction: discord.Interaction, member: discord.Member):
+    uid = str(member.id)
+    exp_data = load_exp_data()
+    user = exp_data.get(uid)
+
+    if not user:
+        return await interaction.response.send_message(f"{member.display_name}님의 정보가 존재하지 않습니다.", ephemeral=True)
+
+    level = user.get("level", 1)
+    exp = user.get("exp", 0)
+    last_ts = user.get("last_activity")
+
+    if last_ts:
+        last_dt = datetime.fromtimestamp(last_ts, KST)
+        elapsed = datetime.now(KST) - last_dt
+        days_ago = elapsed.days
+        last_seen = last_dt.strftime("%Y. %-m. %-d %H:%M")
+    else:
+        last_seen = "기록 없음"
+        days_ago = "-"
+
+    embed = discord.Embed(title=f"📊 {member.display_name}님의 활동 분석", color=discord.Color.orange())
+    embed.add_field(name="레벨", value=f"Lv. {level} ({exp:,} XP)", inline=False)
+    embed.add_field(name="마지막 활동 시각", value=last_seen, inline=False)
+    embed.add_field(name="경과일", value=f"{days_ago}일 경과" if isinstance(days_ago, int) else days_ago, inline=False)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 @app_commands.default_permissions(administrator=True)
 @bot.tree.command(name="경험치지급", description="유저에게 경험치를 지급합니다.")
 async def grant_xp(interaction: discord.Interaction, member: discord.Member, amount: int):
@@ -890,6 +923,7 @@ async def attend(interaction: discord.Interaction):
     ue = expd.get(uid,{"exp":0,"level":1,"voice_minutes":0})
     ue["exp"] += gain
     ue["level"] = calculate_level(ue["exp"])
+    ue["last_activity"] = time.time()
     save_user_exp(uid, ue)
     set_attendance_data(uid, ud)
     first_attend = ud["total_days"] == 1
