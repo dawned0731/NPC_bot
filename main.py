@@ -955,9 +955,10 @@ async def attend(interaction: discord.Interaction):
     ue["last_activity"] = time.time()
 
     if ue["level"] > prev_level:
-    announce = bot.get_channel(LEVELUP_ANNOUNCE_CHANNEL)
-    if announce:
-        await announce.send(f"🎉 {interaction.user.mention} 님이 Lv.{ue['level']} 에 도달했습니다! 🎊")
+        announce = bot.get_channel(LEVELUP_ANNOUNCE_CHANNEL)
+        if announce:
+            await announce.send(f"🎉 {interaction.user.mention} 님이 Lv.{ue['level']} 에 도달했습니다! 🎊")
+
 
     save_user_exp(uid, ue)
     set_attendance_data(uid, ud)
