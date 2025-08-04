@@ -35,6 +35,30 @@ firebase_admin.initialize_app(cred, {
 TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID = int(os.getenv("DISCORD_GUILD_ID", "0"))
 
+# ---- 역할별 인원수를 음성 채널 이름으로 실시간 반영 ----
+
+SEASON_ROLE_CHANNEL_MAP = {
+    "봄": (1401854813356036196, 1386685631551246426),
+    "여름": (1401854844628893718, 1386685631551246425),
+    "가을": (1401854913117687889, 1386685631551246424),
+    "겨울": (1401854945547915316, 1386685631551246423),
+}
+
+async def update_season_voice_channels():
+    for guild in bot.guilds:
+        for season, (role_id, channel_id) in SEASON_ROLE_CHANNEL_MAP.items():
+            role = guild.get_role(role_id)
+            channel = guild.get_channel(channel_id)
+            if role and channel:
+                count = len(role.members)
+                new_name = f"[{season}], 그 사이의 {count}명"
+                if channel.name != new_name:
+                    try:
+                        await channel.edit(name=new_name)
+                    except Exception as e:
+                        print(f"❌ 채널 이름 변경 실패 ({season}): {e}")
+
+
 # 로컬 데이터 디렉토리 생성
 os.makedirs("data", exist_ok=True)
 
@@ -42,6 +66,7 @@ os.makedirs("data", exist_ok=True)
 EXP_PATH = "data/exp.json"
 MISSION_PATH = "data/mission.json"
 LOG_CHANNEL_ID = 1386685633136820248
+INACTIVE_LOG_CHANNEL_ID = 1386685633136820247
 LEVELUP_ANNOUNCE_CHANNEL = 1386685634462093332
 TARGET_TEXT_CHANNEL_ID = 1386685633413775416
 THREAD_ROLE_CHANNEL_ID = 1389632514045251674
@@ -276,6 +301,7 @@ bot = commands.Bot(
 @bot.event
 async def on_ready():
     bot.tree.add_command(hidden_quest, override=True)
+    await update_season_voice_channels()
 
     print(f"✅ {bot.user} 온라인")
     # 슬래시 커맨드 동기화
@@ -299,6 +325,9 @@ async def on_member_update(before, after):
     before_roles = set(r.id for r in before.roles)
     after_roles = set(r.id for r in after.roles)
     added = after_roles - before_roles
+    
+    if before_roles != after_roles:
+        await update_season_voice_channels()
 
     # 특정 스레드 역할이 부여되면 환영 메시지
     if THREAD_ROLE_ID in added:
@@ -338,7 +367,7 @@ async def inactive_user_log_task():
     exp_data = load_exp_data()
     # UTC 타임스탬프 기준 5일 전
     threshold = datetime.now(KST) - timedelta(days=5)
-    log_channel = bot.get_channel(LOG_CHANNEL_ID)
+    log_channel = bot.get_channel(INACTIVE_LOG_CHANNEL_ID)
 
     if not log_channel:
         return
@@ -918,14 +947,21 @@ async def attend(interaction: discord.Interaction):
     ud.setdefault("weekly", {})[week] = ud["weekly"].get(week,0)+1
     ud.setdefault("monthly", {})[month] = ud["monthly"].get(month,0)+1
     # 경험치 지급
-    gain = min(200, 100+(min(ud["streak"],10)-1)*10)
+    gain = 100 + min(ud["streak"] - 1, 10) * 10
     expd = load_exp_data()
     ue = expd.get(uid,{"exp":0,"level":1,"voice_minutes":0})
     ue["exp"] += gain
     ue["level"] = calculate_level(ue["exp"])
     ue["last_activity"] = time.time()
+
+    if ue["level"] > prev_level:
+    announce = bot.get_channel(LEVELUP_ANNOUNCE_CHANNEL)
+    if announce:
+        await announce.send(f"🎉 {interaction.user.mention} 님이 Lv.{ue['level']} 에 도달했습니다! 🎊")
+
     save_user_exp(uid, ue)
     set_attendance_data(uid, ud)
+    await update_role_and_nick(member, user["level"])
     first_attend = ud["total_days"] == 1
     streak_reset = ud["streak"] == 1 and ud["last_date"] != yesterday
 
