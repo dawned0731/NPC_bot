@@ -963,7 +963,7 @@ async def attend(interaction: discord.Interaction):
 
     save_user_exp(uid, ue)
     set_attendance_data(uid, ud)
-    await update_role_and_nick(member, user["level"])
+    await update_role_and_nick(interaction.user, ue["level"])
     first_attend = ud["total_days"] == 1
     streak_reset = ud["streak"] == 1 and ud["last_date"] != yesterday
 
