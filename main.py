@@ -950,6 +950,7 @@ async def attend(interaction: discord.Interaction):
     gain = 100 + min(ud["streak"] - 1, 10) * 10
     expd = load_exp_data()
     ue = expd.get(uid,{"exp":0,"level":1,"voice_minutes":0})
+    prev_level = ue["level"]
     ue["exp"] += gain
     ue["level"] = calculate_level(ue["exp"])
     ue["last_activity"] = time.time()
