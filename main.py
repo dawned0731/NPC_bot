@@ -1156,71 +1156,108 @@ def _start_flask():
         daemon=True,
     ).start()
 
+# ---- Launchers (Flask thread + Discord safe start) ----
+import threading, asyncio, random, discord, os, time
+
+def _start_flask():
+    port = int(os.getenv("PORT", "10000"))
+    threading.Thread(
+        target=app.run,
+        kwargs={"host": "0.0.0.0", "port": port, "use_reloader": False},
+        daemon=True,
+    ).start()
+
 async def _safe_start():
     """
     디스코드 로그인 안전 실행:
-    - 429(Cloudflare 1015 포함) 시 충분히 긴 백오프로 재시도
-    - 'Session is closed' 발생 시 프로세스 강제 종료 → Render가 새로 띄우게
+    - 로그인 타임아웃(<=180s)으로 '매달림' 방지
+    - 429(Cloudflare 1015): 30→60→90→120분 보수적 백오프
+    - 'Session is closed': 10분 내 2회일 때만 프로세스 종료(깨끗한 재시작)
     """
-    backoff = 10   # 시작 10초
-    max_backoff = 1800  # 최대 30분
+    base = 1800          # 30분
+    max_backoff = 7200   # 2시간
+    penalty = 0          # 연속 429 누적
+    login_timeout = 180  # 최대 3분 대기
+
+    sess_closed_count = 0
+    sess_window_start = None
+    window_secs = 600    # 10분
+
     while True:
         try:
             print("[login] bot.start 시도")
-            await bot.start(TOKEN)
+            # 로그인 시도에 타임아웃을 걸어 '무한 대기' 방지
+            await asyncio.wait_for(bot.start(TOKEN), timeout=login_timeout)
             print("[login] bot.start 정상 종료")
+        except asyncio.TimeoutError:
+            # 로그인 단계에서 응답이 없으면 세션 정리 후 보수적 대기
+            try:
+                await bot.close()
+            except Exception:
+                pass
+            wait = int(base * random.uniform(0.95, 1.1))   # ~30분
+            print(f"[login] timeout(>{login_timeout}s). backoff {wait}s")
+            await asyncio.sleep(wait)
+
         except discord.HTTPException as e:
             status = getattr(e, "status", None)
-            # 세션 정리
             try:
                 await bot.close()
             except Exception:
                 pass
 
-            # 429면 아주 길게 쉬자 (Cloudflare 1015 쿨타임 고려)
             if status == 429:
-                wait = max(backoff, 900)  # 최소 15분
-                wait = min(int(wait * random.uniform(0.9, 1.1)), max_backoff)
+                penalty = min(penalty + 1, 3)                       # 0→1→2→3
+                wait = min(base + penalty * 1800, max_backoff)       # 30→60→90→120
+                wait = int(wait * random.uniform(0.95, 1.1))         # 지터
                 print(f"[login] 429/Cloudflare rate limit. backoff {wait}s")
                 await asyncio.sleep(wait)
-                backoff = min(wait * 2, max_backoff)
                 continue
 
-            # 그 외 HTTP 예외
-            wait = min(int(backoff * random.uniform(0.8, 1.2)), max_backoff)
+            wait = int(min(base, max_backoff) * random.uniform(0.5, 1.0))
             print(f"[login] HTTP {status}; backoff {wait}s: {e!r}")
             await asyncio.sleep(wait)
-            backoff = min(backoff * 2, max_backoff)
 
         except RuntimeError as e:
-            # aiohttp 세션이 망가진 케이스는 무한 재시도보다 '깨끗한 재시작'이 안전
-            if "Session is closed" in str(e):
-                print("[login] 'Session is closed' 감지 → 프로세스 재시작")
-                # Render가 즉시 재실행하므로 종료
-                os._exit(1)
-            else:
-                # 기타 런타임에러는 일반 백오프
+            msg = str(e)
+            if "Session is closed" in msg:
+                now = time.time()
+                if not sess_window_start or now - sess_window_start > window_secs:
+                    sess_window_start = now
+                    sess_closed_count = 1
+                else:
+                    sess_closed_count += 1
+
+                if sess_closed_count >= 2:
+                    print("[fatal] SESSION_CLOSED_EXIT: 10분 내 2회 → 프로세스 재시작")
+                    os._exit(1)
+
                 try:
                     await bot.close()
                 except Exception:
                     pass
-                wait = min(int(backoff * random.uniform(0.8, 1.2)), max_backoff)
+                wait = int(900 * random.uniform(0.9, 1.1))  # ~15분
+                print(f"[login] 'Session is closed' 1회. backoff {wait}s")
+                await asyncio.sleep(wait)
+            else:
+                try:
+                    await bot.close()
+                except Exception:
+                    pass
+                wait = int(900 * random.uniform(0.8, 1.2))
                 print(f"[login] RuntimeError; backoff {wait}s: {e!r}")
                 await asyncio.sleep(wait)
-                backoff = min(backoff * 2, max_backoff)
 
         except Exception as e:
-            # 알 수 없는 예외: 세션 닫고 백오프
             try:
                 await bot.close()
             except Exception:
                 pass
-            wait = min(int(backoff * random.uniform(0.8, 1.2)), max_backoff)
+            wait = int(900 * random.uniform(0.8, 1.2))
             print(f"[login] unexpected; backoff {wait}s: {e!r}")
             await asyncio.sleep(wait)
-            backoff = min(backoff * 2, max_backoff)
         else:
-            break  # 정상 종료 시 탈출
+            break
 
 
 # --- 강제 로깅 활성화 (INFO 이상 콘솔 출력)
@@ -1229,7 +1266,16 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     stream=sys.stdout,
 )
-# discord 내부 로거 레벨도 올리기
+
+# ---- logging: Discord 내부 단계까지 보이게 ----
+import logging, sys
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    stream=sys.stdout,
+)
+# discord 내부 로거 가시성 상승
+logging.getLogger("discord").setLevel(logging.INFO)
 logging.getLogger("discord.client").setLevel(logging.INFO)
 logging.getLogger("discord.gateway").setLevel(logging.INFO)
 logging.getLogger("discord.http").setLevel(logging.INFO)
