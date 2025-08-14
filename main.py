@@ -165,13 +165,54 @@ def save_json(path, data):
 
 
 # ---- 유틸 함수 ----
-def calculate_level(exp):
-    """누적 경험치로부터 레벨을 계산"""
-    for lvl in range(1, 100):
-        required = ((lvl * 30) + (lvl ** 2 * 7)) * 18
-        if exp < required:
-            return lvl
-    return 99
+# === 레벨 곡선: 5단계 등비(엔드게임 초하드) ===
+from bisect import bisect_right
+
+LEVEL_MAX = 99
+
+# 각 항목: (start_level, end_level, start_delta, ratio, jump_from_prev_end)
+# start_delta가 None이면 '직전 단계 마지막 Δ × jump'로 시작
+STAGES = [
+    (1, 10, 280, 1.05, 1.0),   # A: 초반 완화
+    (11, 30, None, 1.06, 1.2), # B
+    (31, 60, None, 1.08, 1.4), # C
+    (61, 85, None, 1.10, 1.6), # D
+    (86, 99, None, 1.17, 2.0), # E: 엔드게임 급상승
+]
+
+def _build_piecewise_geometric_deltas(stages, Lmax):
+    """각 레벨 Δ(필요치) 생성. 반올림 후 단조증가 보정."""
+    deltas = []
+    prev_d = None
+    for (a, b, start_d, r, jump) in stages:
+        if start_d is None:
+            start_d = int(round(prev_d * jump))
+        for L in range(a, b + 1):
+            if L == a:
+                d = start_d
+            else:
+                d = int(round(d * r))
+            if prev_d is not None and d <= prev_d:
+                d = prev_d + 1  # 반올림으로 인한 비단조 방지
+            deltas.append(d)
+            prev_d = d
+    if len(deltas) < Lmax:
+        deltas += [deltas[-1]] * (Lmax - len(deltas))
+    return deltas[:Lmax]
+
+# Δ[1..99]
+GEOM_DELTAS = _build_piecewise_geometric_deltas(STAGES, LEVEL_MAX)
+
+# T[L] = Lv.L '진입' 임계 누적치 (T[0]=0, T[1]=Δ1, ...)
+THRESHOLDS = [0]
+for d in GEOM_DELTAS:
+    THRESHOLDS.append(THRESHOLDS[-1] + d)
+
+def calculate_level(exp: int) -> int:
+    """T[L-1] <= exp < T[L] 이면 현재 레벨 L (1..99)"""
+    idx = bisect_right(THRESHOLDS, exp) - 1
+    return max(1, min(idx + 1, LEVEL_MAX))
+
 
 
 # 레벨별 역할 ID 리스트
@@ -845,17 +886,15 @@ async def info(interaction: discord.Interaction):
     if lvl != user["level"]:
         user["level"] = lvl
         save_user_exp(uid, user)
-    # 이전 !정보 임베드 로직 그대로 사용
-    if lvl > 1:
-        prev_req = ((lvl - 1) * 30 + (lvl - 1) ** 2 * 7) * 18
-    else:
-        prev_req = 0
-    curr_req = ((lvl * 30) + lvl ** 2 * 7) * 18
-    progress = max(0, current_exp - prev_req)
-    total = curr_req - prev_req
-    percent = (progress / total) * 100 if total else 0
+    # 새 등비 5단계 곡선 기준 진행도 계산
+    left = THRESHOLDS[lvl - 1]
+    right = THRESHOLDS[lvl] if lvl <= LEVEL_MAX else THRESHOLDS[-1]
+    progress = max(0, current_exp - left)
+    total = max(1, right - left)
+    percent = (progress / total) * 100
     filled = int(percent / 5)
     bar = "🟦" * filled + "⬜" * (20 - filled)
+
     embed = discord.Embed(title=f"📊 {interaction.user.display_name}님의 정보", color=discord.Color.blue())
     embed.add_field(name="레벨", value=f"Lv. {lvl} (누적: {current_exp:,} XP)", inline=False)
     embed.add_field(name="경험치", value=f"{progress:,} / {total:,} XP", inline=False)
