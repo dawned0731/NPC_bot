@@ -13,6 +13,7 @@ import pytz
 import asyncio
 from datetime import time as dtime
 from threading import Thread
+import logging, sys
 
 
 # ---- Firebase 초기화 ----
@@ -394,8 +395,11 @@ async def on_ready():
     except Exception as e:
         print(f"[on_ready] update_season_voice_channels error: {e!r}")
 
-    print(f"✅ {bot.user} 온라인")
 
+    print(f"✅ {bot.user} 온라인")
+    logging.info(f"[ready] logged in as {bot.user} (id={bot.user.id})")
+    await bot.change_presence(activity=discord.Game("부팅 점검 중"))
+    
     # 3) 슬래시 커맨드 동기화: 최초 1회만
     if not getattr(bot, "_synced", False):
         try:
@@ -1143,13 +1147,14 @@ def _start_flask():
     ).start()
     
 async def _safe_start():
-    # 디스코드 로그인 안전 실행: 429 등에서 지수 백오프
-    backoff = 5  # 5→10→20... 최대 600초
+    logging.info("[boot] _safe_start 진입")
+    backoff = 5
     while True:
         try:
+            logging.info("[login] bot.start 시도")
             await bot.start(TOKEN)
-        except discord.HTTPException as e:
-            status = getattr(e, "status", None)
+            logging.info("[login] bot.start 정상 종료")
+
             # === 중요: 실패 시 세션 정리 ===
             try:
                 await bot.close()
@@ -1179,6 +1184,16 @@ async def _safe_start():
         else:
             break  # 정상 종료 시 루프 탈출
 
+# --- 강제 로깅 활성화 (INFO 이상 콘솔 출력)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    stream=sys.stdout,
+)
+# discord 내부 로거 레벨도 올리기
+logging.getLogger("discord.client").setLevel(logging.INFO)
+logging.getLogger("discord.gateway").setLevel(logging.INFO)
+logging.getLogger("discord.http").setLevel(logging.INFO)
 
 if __name__ == "__main__":
     _start_flask()
