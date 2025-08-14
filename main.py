@@ -341,23 +341,38 @@ bot = commands.Bot(
 # ---- on_ready ----
 @bot.event
 async def on_ready():
-    bot.tree.add_command(hidden_quest, override=True)
-    await update_season_voice_channels()
+    # 1) 커맨드 등록: 최초 1회만
+    if not getattr(bot, "_commands_added", False):
+        try:
+            bot.tree.add_command(hidden_quest, override=True)
+            bot._commands_added = True
+        except Exception as e:
+            print(f"[on_ready] add_command failed: {e!r}")
+
+    # 2) 시즌 보이스 채널 업데이트 (예외 로깅)
+    try:
+        await update_season_voice_channels()
+    except Exception as e:
+        print(f"[on_ready] update_season_voice_channels error: {e!r}")
 
     print(f"✅ {bot.user} 온라인")
-    # 슬래시 커맨드 동기화
-    try:
-        synced = await bot.tree.sync()
-        print(f"🌐 전역 슬래시 커맨드 {len(synced)}개 동기화 완료")
-    except Exception as e:
-        # 환경 변수 누락 혹은 429 에러 등 처리
-        print(f"❌ 슬래시 커맨드 동기화 실패: {e}")
 
-    # 백그라운드 태스크 시작
-    voice_xp_task.start()
-    reset_daily_missions.start()
-    repeat_vc_mission_task.start()
-    inactive_user_log_task.start()
+    # 3) 슬래시 커맨드 동기화: 최초 1회만
+    if not getattr(bot, "_synced", False):
+        try:
+            synced = await bot.tree.sync()  # 전역 등록
+            bot._synced = True
+            print(f"🌐 전역 슬래시 커맨드 {len(synced)}개 동기화 완료")
+        except Exception as e:
+            print(f"❌ 슬래시 커맨드 동기화 실패: {e!r}")
+
+    # 4) 백그라운드 태스크 안전 시작(중복 방지)
+    for task in (voice_xp_task, reset_daily_missions, repeat_vc_mission_task, inactive_user_log_task):
+        try:
+            if not task.is_running():
+                task.start()
+        except Exception as e:
+            print(f"[on_ready] task start error: {e!r}")
 
 
 # ---- on_member_update: 환영 메시지 및 역할 동기화 ----
