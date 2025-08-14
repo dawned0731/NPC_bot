@@ -19,6 +19,9 @@ from threading import Thread
 # 환경 변수에서 Firebase 키(JSON) 로드
 load_dotenv()
 firebase_key_json = os.getenv("FIREBASE_KEY_JSON")
+# === fail-fast: Firebase 키 없으면 즉시 종료 ===
+if not firebase_key_json:
+    raise RuntimeError("FIREBASE_KEY_JSON 환경변수가 설정되어 있지 않습니다.")
 try:
     firebase_key_dict = json.loads(firebase_key_json)
 except json.decoder.JSONDecodeError:
@@ -36,6 +39,9 @@ firebase_admin.initialize_app(cred, {
 # Discord 봇 토큰 및 슬래시 커맨드 동기화를 위한 길드 ID
 TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID = int(os.getenv("DISCORD_GUILD_ID", "0"))
+# === fail-fast: 토큰 없으면 즉시 종료 ===
+if not TOKEN:
+    raise RuntimeError("DISCORD_TOKEN 환경변수가 설정되어 있지 않습니다.")
 
 # ---- 역할별 인원수를 음성 채널 이름으로 실시간 반영 ----
 
@@ -477,7 +483,6 @@ async def inactive_user_log_task():
 
 
 @tasks.loop(time=dtime(hour=15, minute=0))
-
 async def reset_daily_missions():
     """일일 미션 데이터 초기화 (로컬 및 DB)"""
     try:
@@ -647,112 +652,118 @@ async def on_message(message):
         print(f"❌ on_message 처리 중 오류: {e}")
 
     # ---- 히든 퀘스트 진행 처리 ----
-        # 메시지에 '아니' 키워드가 포함된 경우에만 트랜잭션 실행
-        if "아니" in message.content:
-            ref_hq = db.reference(f"{HIDDEN_QUEST_KEY}/1")
-            def txn(cur):
-                cur = hidden_quest_txn(cur)
-                cnts = cur.get("counts", {})
-                if not cur["completed"] and "아니" in message.content:
-                    uid = str(message.author.id)
-                    now = datetime.now(KST)
-                    ts_map = cur.get("timestamps", {})
-                    first_time_str = ts_map.get(uid)
+    # 메시지에 '아니' 키워드가 포함된 경우에만 트랜잭션 실행
+    if "아니" in message.content:
+        ref_hq = db.reference(f"{HIDDEN_QUEST_KEY}/1")
+        def txn(cur):
+            cur = hidden_quest_txn(cur)
+            cnts = cur.get("counts", {})
+            if not cur["completed"] and "아니" in message.content:
+                uid = str(message.author.id)
+                now = datetime.now(KST)
+                ts_map = cur.get("timestamps", {})
+                first_time_str = ts_map.get(uid)
 
-                    if not first_time_str:
-                        ts_map[uid] = now.isoformat()
-                        cur["timestamps"] = ts_map
+                if not first_time_str:
+                    ts_map[uid] = now.isoformat()
+                    cur["timestamps"] = ts_map
+                    cnts[uid] = 1                   # ✅ 첫 기록은 1로 시작
+                else:
+                    first_time = datetime.fromisoformat(first_time_str)
+                    if now - first_time > timedelta(hours=24):
+                        cur["timestamps"][uid] = now.isoformat()
+                        cnts[uid] = 1               # ✅ 하루 경과했으면 리셋 후 1
                     else:
-                        first_time = datetime.fromisoformat(first_time_str)
-                        if now - first_time > timedelta(hours=24):
-                            cur["timestamps"][uid] = now.isoformat()
-                            cnts[uid] = 1
-                        else:
-                            cnts[uid] = cnts.get(uid, 0) + 1
-                    cur["counts"] = cnts
-                    if cnts[uid] >= 50:
-                        cur["completed"] = True
-                        cur["winner"] = uid
-                        cur["completed_at"] = datetime.now(KST).strftime("%Y. %-m. %-d %H:%M")
-                return cur
-            result = ref_hq.transaction(txn)
-            if result.get("completed") and result.get("winner") == str(message.author.id):
-                await message.channel.send(
-                    f"🎉 {message.author.mention}님, 히든 퀘스트 [아니시에이팅]을(를) 완료하셨습니다!"
-                )
+                        cnts[uid] = cnts.get(uid, 0) + 1
 
-        # 메시지에 '감사합니다' 키워드가 포함된 경우에만 트랜잭션 실행
-        if "감사합니다" in message.content:
-            ref_hq = db.reference(f"{HIDDEN_QUEST_KEY}/2")
-            def txn2(cur):
-                cur = hidden_quest_txn(cur)
-                cnts = cur.get("counts", {})
-                if not cur["completed"] and "감사합니다" in message.content:
-                    uid = str(message.author.id)
-                    now = datetime.now(KST)
-                    ts_map = cur.get("timestamps", {})
-                    first_time_str = ts_map.get(uid)
+                cur["counts"] = cnts
+                if cnts[uid] >= 50:
+                    cur["completed"] = True
+                    cur["winner"] = uid
+                    cur["completed_at"] = datetime.now(KST).strftime("%Y. %-m. %-d %H:%M")
+            return cur
 
-                    if not first_time_str:
-                        ts_map[uid] = now.isoformat()
-                        cur["timestamps"] = ts_map
+        result = ref_hq.transaction(txn)
+        if result.get("completed") and result.get("winner") == str(message.author.id):
+            await message.channel.send(
+                f"🎉 {message.author.mention}님, 히든 퀘스트 [아니시에이팅]을(를) 완료하셨습니다!"
+            )
+
+    # 메시지에 '감사합니다' 키워드가 포함된 경우에만 트랜잭션 실행
+    if "감사합니다" in message.content:
+        ref_hq = db.reference(f"{HIDDEN_QUEST_KEY}/2")
+        def txn2(cur):
+            cur = hidden_quest_txn(cur)
+            cnts = cur.get("counts", {})
+            if not cur["completed"] and "감사합니다" in message.content:
+                uid = str(message.author.id)
+                now = datetime.now(KST)
+                ts_map = cur.get("timestamps", {})
+                first_time_str = ts_map.get(uid)
+
+                if not first_time_str:
+                    ts_map[uid] = now.isoformat()
+                    cur["timestamps"] = ts_map
+                    cnts[uid] = 1                   # ✅ 첫 기록은 1로 시작
+                else:
+                    first_time = datetime.fromisoformat(first_time_str)
+                    if now - first_time > timedelta(hours=24):
+                        cur["timestamps"][uid] = now.isoformat()
+                        cnts[uid] = 1               # ✅ 하루 경과했으면 리셋 후 1
                     else:
-                        first_time = datetime.fromisoformat(first_time_str)
-                        if now - first_time > timedelta(hours=24):
-                            cur["timestamps"][uid] = now.isoformat()
-                            cnts[uid] = 1
-                        else:
-                            cnts[uid] = cnts.get(uid, 0) + 1
-                    cur["counts"] = cnts
-                    if cnts[uid] >= 50:
-                        cur["completed"] = True
-                        cur["winner"] = uid
-                        cur["completed_at"] = datetime.now(KST).strftime("%Y. %-m. %-d %H:%M")
-                return cur
-            result = ref_hq.transaction(txn2)
-            if result.get("completed") and result.get("winner") == str(message.author.id):
-                await message.channel.send(
-                    f"🎉 {message.author.mention}님, 히든 퀘스트 [감사한 마음] 달성!"
-                )
+                        cnts[uid] = cnts.get(uid, 0) + 1
 
-      
-        # 메시지에 '파푸' 키워드가 포함된 경우에만 트랜잭션 실행
-        if "파푸" in message.content:
-            ref_hq = db.reference(f"{HIDDEN_QUEST_KEY}/3")
-            def txn3(cur):
-                cur = hidden_quest_txn(cur)
-                cnts = cur.get("counts", {})
-                if not cur["completed"] and "파푸" in message.content:
-                    uid = str(message.author.id)
-                    now = datetime.now(KST)
-                    ts_map = cur.get("timestamps", {})
-                    first_time_str = ts_map.get(uid)
+                cur["counts"] = cnts
+                if cnts[uid] >= 50:
+                    cur["completed"] = True
+                    cur["winner"] = uid
+                    cur["completed_at"] = datetime.now(KST).strftime("%Y. %-m. %-d %H:%M")
+            return cur
 
-                    if not first_time_str:
+        result = ref_hq.transaction(txn2)
+        if result.get("completed") and result.get("winner") == str(message.author.id):
+            await message.channel.send(
+                f"🎉 {message.author.mention}님, 히든 퀘스트 [감사한 마음] 달성!"
+            )
+
+    # 메시지에 '파푸' 키워드가 포함된 경우에만 트랜잭션 실행
+    if "파푸" in message.content:
+        ref_hq = db.reference(f"{HIDDEN_QUEST_KEY}/3")
+        def txn3(cur):
+            cur = hidden_quest_txn(cur)
+            cnts = cur.get("counts", {})
+            if not cur["completed"] and "파푸" in message.content:
+                uid = str(message.author.id)
+                now = datetime.now(KST)
+                ts_map = cur.get("timestamps", {})
+                first_time_str = ts_map.get(uid)
+
+                if not first_time_str:
+                    ts_map[uid] = now.isoformat()
+                    cur["timestamps"] = ts_map
+                    cnts[uid] = 1
+                else:
+                    first_time = datetime.fromisoformat(first_time_str)
+                    if now - first_time > timedelta(hours=24):
                         ts_map[uid] = now.isoformat()
                         cur["timestamps"] = ts_map
                         cnts[uid] = 1
                     else:
-                        first_time = datetime.fromisoformat(first_time_str)
-                        if now - first_time > timedelta(hours=24):
-                            ts_map[uid] = now.isoformat()
-                            cur["timestamps"] = ts_map
-                            cnts[uid] = 1
-                        else:
-                            cnts[uid] = cnts.get(uid, 0) + 1
+                        cnts[uid] = cnts.get(uid, 0) + 1
 
-                    cur["counts"] = cnts
+                cur["counts"] = cnts
 
-                    if cnts[uid] >= 45:
-                        cur["completed"] = True
-                        cur["winner"] = uid
-                        cur["completed_at"] = datetime.now(KST).strftime("%Y. %-m. %-d %H:%M")
-                return cur
-            result = ref_hq.transaction(txn3)
-            if result.get("completed") and result.get("winner") == str(message.author.id):
-                await message.channel.send(
-                    f"🎉 {message.author.mention}님, 히든 퀘스트 [파푸 애호가] 달성!"
-                )
+                if cnts[uid] >= 45:
+                    cur["completed"] = True
+                    cur["winner"] = uid
+                    cur["completed_at"] = datetime.now(KST).strftime("%Y. %-m. %-d %H:%M")
+            return cur
+
+        result = ref_hq.transaction(txn3)
+        if result.get("completed") and result.get("winner") == str(message.author.id):
+            await message.channel.send(
+                f"🎉 {message.author.mention}님, 히든 퀘스트 [파푸 애호가] 달성!"
+            )
 
 
 # ---- 슬래시 관리자 명령어 ----
@@ -1124,12 +1135,13 @@ def home():
 import threading, asyncio, random, discord
 
 def _start_flask():
-    # Flask는 별도 스레드로, 재로더 끄고 데몬으로 실행
+    port = int(os.getenv("PORT", "10000"))
     threading.Thread(
         target=app.run,
-        kwargs={"host": "0.0.0.0", "port": 10000, "use_reloader": False},
+        kwargs={"host": "0.0.0.0", "port": port, "use_reloader": False},
         daemon=True,
     ).start()
+
 
 async def _safe_start():
     # 디스코드 로그인 안전 실행: 429(Cloudflare) 등에서 지수 백오프
