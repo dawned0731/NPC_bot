@@ -1120,9 +1120,41 @@ app = Flask(__name__)
 def home():
     return "Bot is running!"
 
-# Flask 웹 서버를 별도 스레드로 실행
-threading.Thread(target=lambda: app.run(host="0.0.0.0", port=10000)).start()
+# ---- Launchers (Flask thread + Discord safe start) ----
+import threading, asyncio, random, discord
 
-# Discord Bot 실행
-bot.run(TOKEN)
+def _start_flask():
+    # Flask는 별도 스레드로, 재로더 끄고 데몬으로 실행
+    threading.Thread(
+        target=app.run,
+        kwargs={"host": "0.0.0.0", "port": 10000, "use_reloader": False},
+        daemon=True,
+    ).start()
+
+async def _safe_start():
+    # 디스코드 로그인 안전 실행: 429(Cloudflare) 등에서 지수 백오프
+    backoff = 5  # 초단위. 5→10→20... 최대 600초
+    while True:
+        try:
+            await bot.start(TOKEN)
+        except discord.HTTPException as e:
+            status = getattr(e, "status", None)
+            wait = min(int(backoff * random.uniform(0.7, 1.3)), 600)
+            if status == 429:
+                print(f"[login] 429 rate limited. backing off {wait}s")
+            else:
+                print(f"[login] HTTP {status}; backoff {wait}s: {e!r}")
+            await asyncio.sleep(wait)
+            backoff = min(backoff * 2, 600)
+        except Exception as e:
+            wait = min(int(backoff * random.uniform(0.7, 1.3)), 600)
+            print(f"[login] unexpected; backoff {wait}s: {e!r}")
+            await asyncio.sleep(wait)
+            backoff = min(backoff * 2, 600)
+        else:
+            break  # 정상 종료 시 루프 탈출
+
+if __name__ == "__main__":
+    _start_flask()
+    asyncio.run(_safe_start())
 
