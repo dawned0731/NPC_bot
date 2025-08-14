@@ -12,6 +12,8 @@ from firebase_admin import credentials, db
 import pytz
 import asyncio
 from datetime import time as dtime
+from threading import Thread
+
 
 # ---- Firebase 초기화 ----
 # 환경 변수에서 Firebase 키(JSON) 로드
@@ -100,6 +102,37 @@ KST = pytz.timezone("Asia/Seoul")
 
 
 # ---- Firebase 핸들링 함수 ----
+
+
+# ---- Firebase 비동기 래퍼 (블로킹 방지) ----
+import asyncio
+
+async def aload_exp_data():
+    return await asyncio.to_thread(load_exp_data)
+
+async def asave_exp_data(data):
+    return await asyncio.to_thread(save_exp_data, data)
+
+async def asave_user_exp(user_id, user_data):
+    return await asyncio.to_thread(save_user_exp, user_id, user_data)
+
+async def aload_mission_data():
+    return await asyncio.to_thread(load_mission_data)
+
+async def asave_mission_data(data):
+    return await asyncio.to_thread(save_mission_data, data)
+
+async def asave_user_mission(user_id, user_mission):
+    return await asyncio.to_thread(save_user_mission, user_id, user_mission)
+
+async def aget_attendance_data():
+    return await asyncio.to_thread(get_attendance_data)
+
+async def aset_attendance_data(user_id, data):
+    return await asyncio.to_thread(set_attendance_data, user_id, data)
+
+
+
 def load_exp_data():
     """사용자 경험치 데이터를 Realtime DB에서 가져옵니다."""
     return db.reference("exp_data").get() or {}
@@ -395,7 +428,7 @@ async def on_member_update(before, after):
             )
 
         # DB에서 경험치, 레벨 로드 후 역할/닉네임 동기화
-        exp_data = load_exp_data()
+        exp_data = await aload_exp_data()
         uid = str(after.id)
         user_data = exp_data.get(uid, {"exp": 0, "level": 1, "voice_minutes": 0})
         new_level = calculate_level(user_data["exp"])
@@ -420,7 +453,7 @@ async def on_member_update(before, after):
 @tasks.loop(hours=24)
 async def inactive_user_log_task():
     """5일 미접속 사용자 로그"""
-    exp_data = load_exp_data()
+    exp_data = await aload_exp_data()
     # UTC 타임스탬프 기준 5일 전
     threshold = datetime.now(KST) - timedelta(days=5)
     log_channel = bot.get_channel(INACTIVE_LOG_CHANNEL_ID)
@@ -451,7 +484,7 @@ async def reset_daily_missions():
         # 로컬 파일 초기화
         save_json(MISSION_PATH, {})
         # Realtime DB의 mission_data 노드 초기화
-        db.reference("mission_data").set({})
+        await asave_mission_data({})
         print("🔁 일일 미션 초기화 완료")
     except Exception as e:
         # 오류 발생 시 로그 채널에 알림하거나 콘솔에 에러 기록
@@ -462,7 +495,7 @@ async def reset_daily_missions():
 async def voice_xp_task():
     """음성 채널 경험치 태스크"""
     now_ts = time.time()
-    exp_data = load_exp_data()
+    exp_data = await aload_exp_data()
 
     for guild in bot.guilds:
         for vc in guild.voice_channels:
@@ -498,14 +531,14 @@ async def voice_xp_task():
                     if announce:
                         await announce.send(f"🎉 {member.mention} 님이 Lv.{new_level} 에 도달했습니다! 🎊")
 
-                save_user_exp(uid, user_data)
+                await asave_user_exp(uid, user_data)
 
 
 @tasks.loop(seconds=60)
 async def repeat_vc_mission_task():
     """반복 VC 미션 보상 태스크"""
-    mission_data = load_mission_data()
-    exp_data = load_exp_data()
+    mission_data = await aload_mission_data()
+    exp_data = await aload_exp_data()
     today = datetime.now(KST).strftime("%Y-%m-%d")
 
     for guild in bot.guilds:
@@ -536,13 +569,13 @@ async def repeat_vc_mission_task():
 
                 mission_data[uid] = user_m
 
-    save_mission_data(mission_data)
+    await asave_mission_data(mission_data)
     # 로컬 JSON에도 백업
     try:
         save_json(MISSION_PATH, mission_data)
     except Exception as e:
         print(f"❌ 미션 로컬 백업 실패: {e}")
-    save_exp_data(exp_data)
+    await asave_exp_data(exp_data)
 
 
 @bot.event
@@ -894,13 +927,13 @@ async def hidden_quest_list(interaction: discord.Interaction):
 @bot.tree.command(name="정보", description="자신의 레벨 및 경험치 정보를 확인합니다.")
 async def info(interaction: discord.Interaction):
     uid = str(interaction.user.id)
-    exp_data = load_exp_data()
+    exp_data = await aload_exp_data()
     user = exp_data.get(uid, {"exp": 0, "level": 1, "voice_minutes": 0})
     current_exp = user["exp"]
     lvl = calculate_level(current_exp)
     if lvl != user["level"]:
         user["level"] = lvl
-        save_user_exp(uid, user)
+        await asave_user_exp(uid, user)
     # 새 등비 5단계 곡선 기준 진행도 계산
     left = THRESHOLDS[lvl - 1]
     right = THRESHOLDS[lvl] if lvl <= LEVEL_MAX else THRESHOLDS[-1]
@@ -949,7 +982,7 @@ async def quest(interaction: discord.Interaction):
 
 @bot.tree.command(name="랭킹", description="경험치 랭킹을 확인합니다.")
 async def ranking(interaction: discord.Interaction):
-    exp_data = load_exp_data()
+    exp_data = await aload_exp_data()
     # 경험치 기준 상위 10명 정렬
     sorted_users = sorted(exp_data.items(), key=lambda x: x[1].get("exp", 0), reverse=True)
     
@@ -989,7 +1022,7 @@ async def attend(interaction: discord.Interaction):
     yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
     week = get_week_key_kst(now)
     month = get_month_key_kst(now)
-    data = get_attendance_data()
+    data = await aget_attendance_data()
     ud = data.get(uid, {"last_date":"","total_days":0,"streak":0,"weekly":{},"monthly":{}})
     if ud["last_date"] == today_str:
         until = (now.replace(hour=0,minute=0,second=0,microsecond=0)+timedelta(days=1)) - now
@@ -1002,7 +1035,7 @@ async def attend(interaction: discord.Interaction):
     ud.setdefault("monthly", {})[month] = ud["monthly"].get(month,0)+1
     # 경험치 지급
     gain = 100 + min(ud["streak"] - 1, 10) * 10
-    expd = load_exp_data()
+    expd = await aload_exp_data()
     ue = expd.get(uid,{"exp":0,"level":1,"voice_minutes":0})
     prev_level = ue["level"]
     ue["exp"] += gain
@@ -1015,8 +1048,8 @@ async def attend(interaction: discord.Interaction):
             await announce.send(f"🎉 {interaction.user.mention} 님이 Lv.{ue['level']} 에 도달했습니다! 🎊")
 
 
-    save_user_exp(uid, ue)
-    set_attendance_data(uid, ud)
+    await asave_user_exp(uid, ue)
+    await aset_attendance_data(uid, ud)
     await update_role_and_nick(interaction.user, ue["level"])
     first_attend = ud["total_days"] == 1
     streak_reset = ud["streak"] == 1 and ud["last_date"] != yesterday
