@@ -1141,16 +1141,21 @@ def _start_flask():
         kwargs={"host": "0.0.0.0", "port": port, "use_reloader": False},
         daemon=True,
     ).start()
-
-
+    
 async def _safe_start():
-    # 디스코드 로그인 안전 실행: 429(Cloudflare) 등에서 지수 백오프
-    backoff = 5  # 초단위. 5→10→20... 최대 600초
+    # 디스코드 로그인 안전 실행: 429 등에서 지수 백오프
+    backoff = 5  # 5→10→20... 최대 600초
     while True:
         try:
             await bot.start(TOKEN)
         except discord.HTTPException as e:
             status = getattr(e, "status", None)
+            # === 중요: 실패 시 세션 정리 ===
+            try:
+                await bot.close()
+            except Exception:
+                pass
+
             wait = min(int(backoff * random.uniform(0.7, 1.3)), 600)
             if status == 429:
                 print(f"[login] 429 rate limited. backing off {wait}s")
@@ -1158,13 +1163,22 @@ async def _safe_start():
                 print(f"[login] HTTP {status}; backoff {wait}s: {e!r}")
             await asyncio.sleep(wait)
             backoff = min(backoff * 2, 600)
+
         except Exception as e:
+            # === 중요: 모든 예외에서 세션 정리 ===
+            try:
+                await bot.close()
+            except Exception:
+                pass
+
             wait = min(int(backoff * random.uniform(0.7, 1.3)), 600)
             print(f"[login] unexpected; backoff {wait}s: {e!r}")
             await asyncio.sleep(wait)
             backoff = min(backoff * 2, 600)
+
         else:
             break  # 정상 종료 시 루프 탈출
+
 
 if __name__ == "__main__":
     _start_flask()
