@@ -1170,36 +1170,23 @@ def _start_flask():
 async def _safe_start():
     """
     디스코드 로그인 안전 실행:
-    - 로그인 타임아웃(<=180s)으로 '매달림' 방지
-    - 429(Cloudflare 1015): 30→60→90→120분 보수적 백오프
-    - 'Session is closed': 10분 내 2회일 때만 프로세스 종료(깨끗한 재시작)
+    - 로그인/연결 전에 발생하는 예외만 백오프 재시도
+    - 실행 후에는 timeout으로 세션을 끊지 않음 (중요)
     """
     base = 1800          # 30분
     max_backoff = 7200   # 2시간
     penalty = 0          # 연속 429 누적
-    login_timeout = 180  # 최대 3분 대기
-
-    sess_closed_count = 0
-    sess_window_start = None
-    window_secs = 600    # 10분
 
     while True:
         try:
-            print("[login] bot.start 시도")
-            # 로그인 시도에 타임아웃을 걸어 '무한 대기' 방지
-            await asyncio.wait_for(bot.start(TOKEN), timeout=login_timeout)
+            print("[login] bot.start 진입")
+            # ❌ timeout 제거: 실행 중에는 세션을 끊지 않는다
+            await bot.start(TOKEN)
             print("[login] bot.start 정상 종료")
-        except asyncio.TimeoutError:
-            # 로그인 단계에서 응답이 없으면 세션 정리 후 보수적 대기
-            try:
-                await bot.close()
-            except Exception:
-                pass
-            wait = int(base * random.uniform(0.95, 1.1))   # ~30분
-            print(f"[login] timeout(>{login_timeout}s). backoff {wait}s")
-            await asyncio.sleep(wait)
+            break  # 정상 종료 시 루프 탈출
 
         except discord.HTTPException as e:
+            # 로그인/연결 직전 단계의 HTTP 오류만 백오프
             status = getattr(e, "status", None)
             try:
                 await bot.close()
@@ -1209,7 +1196,7 @@ async def _safe_start():
             if status == 429:
                 penalty = min(penalty + 1, 3)                       # 0→1→2→3
                 wait = min(base + penalty * 1800, max_backoff)       # 30→60→90→120
-                wait = int(wait * random.uniform(0.95, 1.1))         # 지터
+                wait = int(wait * random.uniform(0.95, 1.1))
                 print(f"[login] 429/Cloudflare rate limit. backoff {wait}s")
                 await asyncio.sleep(wait)
                 continue
@@ -1219,36 +1206,17 @@ async def _safe_start():
             await asyncio.sleep(wait)
 
         except RuntimeError as e:
-            msg = str(e)
-            if "Session is closed" in msg:
-                now = time.time()
-                if not sess_window_start or now - sess_window_start > window_secs:
-                    sess_window_start = now
-                    sess_closed_count = 1
-                else:
-                    sess_closed_count += 1
-
-                if sess_closed_count >= 2:
-                    print("[fatal] SESSION_CLOSED_EXIT: 10분 내 2회 → 프로세스 재시작")
-                    os._exit(1)
-
-                try:
-                    await bot.close()
-                except Exception:
-                    pass
-                wait = int(900 * random.uniform(0.9, 1.1))  # ~15분
-                print(f"[login] 'Session is closed' 1회. backoff {wait}s")
-                await asyncio.sleep(wait)
-            else:
-                try:
-                    await bot.close()
-                except Exception:
-                    pass
-                wait = int(900 * random.uniform(0.8, 1.2))
-                print(f"[login] RuntimeError; backoff {wait}s: {e!r}")
-                await asyncio.sleep(wait)
+            # 드문 런타임 오류에 대해 보수적 백오프 후 재시도
+            try:
+                await bot.close()
+            except Exception:
+                pass
+            wait = int(900 * random.uniform(0.8, 1.2))
+            print(f"[login] RuntimeError; backoff {wait}s: {e!r}")
+            await asyncio.sleep(wait)
 
         except Exception as e:
+            # 알 수 없는 예외
             try:
                 await bot.close()
             except Exception:
@@ -1256,8 +1224,7 @@ async def _safe_start():
             wait = int(900 * random.uniform(0.8, 1.2))
             print(f"[login] unexpected; backoff {wait}s: {e!r}")
             await asyncio.sleep(wait)
-        else:
-            break
+
 
 
 # --- 강제 로깅 활성화 (INFO 이상 콘솔 출력)
