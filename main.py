@@ -37,6 +37,10 @@ firebase_admin.initialize_app(cred, {
 })
 
 # ---- 설정 영역 ----
+EXEMPT_ROLE_IDS = [
+    1391063915655331942,  # 예외 역할 : 관리자
+    1410180795938771066,  # 예외 역할 : 추방 방지
+]
 # Discord 봇 토큰 및 슬래시 커맨드 동기화를 위한 길드 ID
 TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID = int(os.getenv("DISCORD_GUILD_ID", "0"))
@@ -462,29 +466,60 @@ async def on_member_update(before, after):
 # ---- 백그라운드 태스크 정의 ----
 @tasks.loop(hours=24)
 async def inactive_user_log_task():
-    """5일 미접속 사용자 로그"""
+    """5일 미접속 사용자 추방 + 로그"""
     exp_data = await aload_exp_data()
-    # UTC 타임스탬프 기준 5일 전
     threshold = datetime.now(KST) - timedelta(days=5)
     log_channel = bot.get_channel(INACTIVE_LOG_CHANNEL_ID)
 
     if not log_channel:
         return
 
-    missing_users = []
+    kicked = []  # 추방된 유저 기록
+
     for guild in bot.guilds:
         for member in guild.members:
-            if member.bot:
+            if member.bot or member.id == guild.owner_id:
                 continue
-            user = exp_data.get(str(member.id))
-            if user and user.get("last_activity"):
-                last_active = datetime.fromtimestamp(user["last_activity"], KST)
-                if last_active < threshold:
-                    await log_channel.send(f"{member.display_name} 님 5일 미접 상태입니다.")
-                    missing_users.append(member.display_name)
-    if not missing_users:
-        await log_channel.send("✅ 현재 5일 이상 미접속 중인 사용자가 없습니다.")
+            if any(r.id in EXEMPT_ROLE_IDS for r in member.roles):
+                continue
 
+            user = exp_data.get(str(member.id))
+            if not user or not user.get("last_activity"):
+                continue
+
+            last_active = datetime.fromtimestamp(user["last_activity"], KST)
+            if last_active < threshold:
+                # DM 시도
+                try:
+                    embed = discord.Embed(
+                        title="📢 사계절, 그 사이 서버 안내",
+                        description=(
+                            "안녕하세요, '사계절, 그 사이' 서버 관리자입니다.\n\n"
+                            "최근 5일간 서버에 기록된 활동 내역이 없어,\n"
+                            "공지해둔 규칙 사항에 따라 서버에서 추방 처리가 진행됩니다 !\n\n"
+                            "개인 사정에 의해, 혹은 기록 누락 등 피치 못할 사정으로 추방되신 분들은\n"
+                            "아래의 링크를 통해 언제든 다시 서버에 입장하실 수 있습니다.\n"
+                            "앞으로 더 활발히 활동해 주시면 감사하겠습니다 !\n\n"
+                            "👉 https://discord.gg/Npuxrkf38G\n\n"
+                            "- '사계절, 그 사이' 서버장 새벽녘 (새벽녘#0001) -"
+                        ),
+                        color=0x3498db
+                    )
+                    await member.send(embed=embed)
+                except:
+                    await log_channel.send(f"❌ {member.display_name} 님에게 DM 전송 실패")
+
+                # 추방
+                try:
+                    await member.kick(reason="5일 미접속 자동 추방")
+                    await log_channel.send(f"👢 {member.display_name} 님이 5일간 미접속으로 추방되었습니다.")
+                    kicked.append(member.display_name)
+                except Exception as e:
+                    await log_channel.send(f"❌ {member.display_name} 님 추방 실패: {e}")
+
+    # ✅ 아무도 추방되지 않았을 경우에도 로그 남기기
+    if not kicked:
+        await log_channel.send("✅ 현재 5일 이상 미접속 중인 사용자가 없습니다.")
 
 @tasks.loop(time=dtime(hour=15, minute=0))
 async def reset_daily_missions():
