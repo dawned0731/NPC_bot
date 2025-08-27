@@ -635,7 +635,7 @@ async def on_message(message):
                 await message.author.add_roles(role)
 
         # 2) 채팅 경험치 처리 로직
-        exp_data = load_exp_data()
+        exp_data = await aload_exp_data()
         uid = str(message.author.id)
         user_data = exp_data.get(uid, {"exp": 0, "level": 1, "voice_minutes": 0})
         now_ts = time.time()
@@ -656,12 +656,12 @@ async def on_message(message):
             user_data["level"] = new_level
             await update_role_and_nick(message.author, new_level)
 
-        save_user_exp(uid, user_data)
+        await asave_user_exp(uid, user_data)
 
         # 4) 텍스트 미션 집계 (지정 채널만)
         if message.channel.id == TARGET_TEXT_CHANNEL_ID:
-            mission_data = load_mission_data()
-            exp_data = load_exp_data()
+            mission_data = await aload_mission_data()
+            exp_data = await aload_exp_data()
             uid = str(message.author.id)
             today = datetime.now(KST).strftime("%Y-%m-%d")
             user_m = mission_data.get(uid, {"date": today, "text": {"count": 0, "completed": False}, "repeat_vc": {"minutes": 0}})
@@ -676,7 +676,7 @@ async def on_message(message):
                     ue["exp"] += MISSION_EXP_REWARD
                     ue["level"] = calculate_level(ue["exp"])
                     exp_data[uid] = ue
-                    save_exp_data(exp_data)
+                    await asave_exp_data(exp_data)
 
                     log_ch = bot.get_channel(LOG_CHANNEL_ID)
                     if log_ch:
@@ -685,7 +685,7 @@ async def on_message(message):
                     user_m["text"]["completed"] = True
 
             mission_data[uid] = user_m
-            save_user_mission(uid, user_m)
+            await asave_user_mission(uid, user_m)
 
     except Exception as e:
         print(f"❌ on_message 처리 중 오류: {e}")
@@ -963,7 +963,7 @@ async def suggest(interaction: discord.Interaction, 모드: str, 내용: str):
 @app_commands.describe(member="분석할 서버원")
 async def analyze_info(interaction: discord.Interaction, member: discord.Member):
     uid = str(member.id)
-    exp_data = load_exp_data()
+    exp_data = await aload_exp_data()
     user = exp_data.get(uid)
 
     if not user:
@@ -990,7 +990,7 @@ async def analyze_info(interaction: discord.Interaction, member: discord.Member)
 @app_commands.default_permissions(administrator=True)
 @bot.tree.command(name="경험치지급", description="유저에게 경험치를 지급합니다.")
 async def grant_xp(interaction: discord.Interaction, member: discord.Member, amount: int):
-    exp_data = load_exp_data()
+    exp_data = await aload_exp_data()
     uid = str(member.id)
     user_data = exp_data.get(uid, {"exp": 0, "level": 1})
     prev_level = user_data["level"]
@@ -1006,7 +1006,7 @@ async def grant_xp(interaction: discord.Interaction, member: discord.Member, amo
         if ch_log:
             await ch_log.send(f"🎉 {member.mention} 님이 Lv.{new_level} 에 도달했습니다! 🎊")
 
-    save_user_exp(uid, user_data)
+    await asave_user_exp(uid, user_data)
     await interaction.response.send_message(f"✅ {member.mention}에게 경험치 {amount}XP 지급 완료!", ephemeral=True)
 
 
@@ -1018,7 +1018,7 @@ async def deduct_xp(
     amount: int
 ):
     # 데이터 로드
-    exp_data = load_exp_data()
+    exp_data = await aload_exp_data()
     uid = str(member.id)
     user_data = exp_data.get(uid, {"exp": 0, "level": 1})
 
@@ -1027,7 +1027,7 @@ async def deduct_xp(
     user_data["level"] = calculate_level(user_data["exp"])
 
     # DB 저장
-    save_user_exp(uid, user_data)
+    await asave_user_exp(uid, user_data)
 
     # 역할·닉네임 변경 (데바운스 적용)
     await update_role_and_nick(member, user_data["level"])
@@ -1084,7 +1084,7 @@ async def info(interaction: discord.Interaction):
 @bot.tree.command(name="퀘스트", description="일일 및 반복 VC 퀘스트 현황을 확인합니다.")
 async def quest(interaction: discord.Interaction):
     uid = str(interaction.user.id)
-    missions = load_mission_data()
+    missions = await aload_mission_data()
     today = datetime.now(KST).strftime("%Y-%m-%d")
     um = missions.get(uid, {"date": today, "text": {"count": 0, "completed": False}, "repeat_vc": {"minutes": 0}})
     if um.get("date") != today:
@@ -1101,7 +1101,7 @@ async def quest(interaction: discord.Interaction):
     vc_status = f"누적 참여: {vc_minutes}분\n보상 횟수: {vc_rewards}회 지급"
 
     # 출석 여부
-    attendance = get_attendance_data().get(uid, {})
+    (await aget_attendance_data()).get(uid, {})
     last_date = attendance.get("last_date", "")
     attended = last_date == today
     attendance_status = f"상태: {'✅ 출석 완료' if attended else '❌ 출석 안됨'}"
@@ -1208,7 +1208,7 @@ async def attend(interaction: discord.Interaction):
 
 @bot.tree.command(name="출석랭킹", description="출석 랭킹을 확인합니다.")
 async def attend_ranking(interaction: discord.Interaction):
-    data = get_attendance_data()
+    data = await aget_attendance_data()
     # 총 출석일, 연속 출석일 순으로 정렬
     ranked = sorted(
         data.items(),
@@ -1252,30 +1252,7 @@ app = Flask(__name__)
 def home():
     return "Bot is running!"
 
-# ---- Launchers (Flask thread + Discord safe start) ----
-import threading, asyncio, random, discord
-
-def _start_flask():
-    port = int(os.getenv("PORT", "10000"))
-    threading.Thread(
-        target=app.run,
-        kwargs={"host": "0.0.0.0", "port": port, "use_reloader": False},
-        daemon=True,
-    ).start()
-  # ---- Launchers (Flask thread + Discord safe start) ----
-import threading, asyncio, random, discord, os, sys
-
-def _start_flask():
-    port = int(os.getenv("PORT", "10000"))
-    threading.Thread(
-        target=app.run,
-        kwargs={"host": "0.0.0.0", "port": port, "use_reloader": False},
-        daemon=True,
-    ).start()
-
-# ---- Launchers (Flask thread + Discord safe start) ----
-import threading, asyncio, random, discord, os, time
-
+# ---- Launcher (Flask thread) ----
 def _start_flask():
     port = int(os.getenv("PORT", "10000"))
     threading.Thread(
@@ -1351,13 +1328,6 @@ logging.basicConfig(
     stream=sys.stdout,
 )
 
-# ---- logging: Discord 내부 단계까지 보이게 ----
-import logging, sys
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    stream=sys.stdout,
-)
 # discord 내부 로거 가시성 상승
 logging.getLogger("discord").setLevel(logging.INFO)
 logging.getLogger("discord.client").setLevel(logging.INFO)
