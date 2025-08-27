@@ -876,6 +876,88 @@ async def 리셋(inter: discord.Interaction, 번호: int):
 
 # ---- 기타 슬래시 커맨드 핸들러 (/정보, /퀘스트, /랭킹, /출석, /출석랭킹) ----
 
+# 건의함 기능 설정
+SUGGEST_ANON_CHANNEL_ID = 1410186330083954689  # 익명 건의함 채널 ID
+SUGGEST_REAL_CHANNEL_ID = 1410186411310710847  # 실명 건의함 채널 ID
+OWNER_ID = 792661958549045249                  # 서버 오너(본인) ID
+
+from discord import Embed
+
+@bot.tree.command(name="건의함", description="건의사항을 관리자에게 전달합니다.")
+@app_commands.describe(
+    모드="익명 또는 실명 중 선택하세요.",
+    내용="보낼 건의 내용을 작성하세요."
+)
+@app_commands.choices(
+    모드=[
+        app_commands.Choice(name="익명", value="익명"),
+        app_commands.Choice(name="실명", value="실명"),
+    ]
+)
+async def suggest(interaction: discord.Interaction, 모드: str, 내용: str):
+    anon_ch = bot.get_channel(SUGGEST_ANON_CHANNEL_ID)
+    real_ch = bot.get_channel(SUGGEST_REAL_CHANNEL_ID)
+    now_str = datetime.now(KST).strftime("%Y-%m-%d %H:%M")
+
+    # 내용 길이 제한 (임베드 안정성 보장)
+    if len(내용) > 1000:
+        return await interaction.response.send_message(
+            "❌ 건의 내용은 **1000자 이내**로 작성해주세요.",
+            ephemeral=True
+        )
+
+    # === 익명 모드 ===
+    if 모드 == "익명":
+        # 관리자 채널에 익명 건의 임베드 전송
+        embed = Embed(
+            title=f"📢 익명 건의 ({now_str})",
+            description=f"알 수 없는 서버원 님이 아래와 같이 건의하셨습니다:\n\n{내용}",
+            color=0x95a5a6
+        )
+        if anon_ch:
+            await anon_ch.send(embed=embed)
+
+        # 오너 DM 전송 (실제 유저 정보 포함)
+        owner = bot.get_user(OWNER_ID)
+        if owner:
+            exp_data = await aload_exp_data()
+            user = exp_data.get(str(interaction.user.id), {})
+            last_ts = user.get("last_activity")
+            if last_ts:
+                last_dt = datetime.fromtimestamp(last_ts, KST)
+                days_ago = (datetime.now(KST) - last_dt).days
+                last_seen = f"{days_ago}일 전 ({last_dt.strftime('%Y-%m-%d %H:%M')})"
+            else:
+                last_seen = "기록 없음"
+
+            dm_embed = Embed(
+                title=f"📢 익명 건의 (내부 기록) [{now_str}]",
+                color=0xe74c3c
+            )
+            dm_embed.add_field(name="서버 닉네임", value=interaction.user.display_name, inline=False)
+            dm_embed.add_field(name="계정 닉네임", value=f"{interaction.user}", inline=False)
+            dm_embed.add_field(name="서버 입장일", value=interaction.user.joined_at.strftime("%Y-%m-%d %H:%M"), inline=False)
+            dm_embed.add_field(name="최근 활동", value=last_seen, inline=False)
+            dm_embed.add_field(name="건의 내용", value=내용, inline=False)
+
+            try:
+                await owner.send(embed=dm_embed)
+            except:
+                pass  # 실패 시 기록 X, 조용히 무시
+
+    # === 실명 모드 ===
+    elif 모드 == "실명":
+        embed = Embed(
+            title=f"📢 실명 건의 ({now_str})",
+            description=f"서버원 {interaction.user.display_name} 님이 아래와 같이 건의하셨습니다:\n\n{내용}",
+            color=0x2ecc71
+        )
+        if real_ch:
+            await real_ch.send(embed=embed)
+
+    # 사용자에게 전송 완료 알림 (ephemeral)
+    await interaction.response.send_message("✅ 건의가 정상적으로 전달되었습니다.", ephemeral=True)
+
 @app_commands.default_permissions(administrator=True)
 @bot.tree.command(name="정보분석", description="서버원의 경험치 및 마지막 활동일 분석")
 @app_commands.describe(member="분석할 서버원")
