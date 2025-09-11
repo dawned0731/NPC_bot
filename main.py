@@ -1101,8 +1101,8 @@ async def quest(interaction: discord.Interaction):
     vc_status = f"누적 참여: {vc_minutes}분\n보상 횟수: {vc_rewards}회 지급"
 
     # 출석 여부
-    (await aget_attendance_data()).get(uid, {})
-    last_date = attendance.get("last_date", "")
+    attendance_all = await aget_attendance_data()
+    attendance = attendance_all.get(uid, {})
     attended = last_date == today
     attendance_status = f"상태: {'✅ 출석 완료' if attended else '❌ 출석 안됨'}"
 
