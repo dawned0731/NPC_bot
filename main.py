@@ -233,7 +233,7 @@ STAGES = [
     (66, 70,  None,  1.171, 1.21),   # 엔드게임: 꾸준히 가파르되 ‘절벽’은 아님
     (71, 75,  None,  1.196, 1.22),   # 엔드게임: 꾸준히 가파르되 ‘절벽’은 아님
     (76, 80,  None,  1.213, 1.23),   # 엔드게임: 꾸준히 가파르되 ‘절벽’은 아님
-    (81, 85,  None,  1.241, 1.24),   # 엔드게임: 꾸준히 가파르되 ‘절벽’은 아님
+    (81, 90,  None,  1.241, 1.24),   # 엔드게임: 꾸준히 가파르되 ‘절벽’은 아님
     (91, 99,  None,  1.270, 1.25),   # 엔드게임: 꾸준히 가파르되 ‘절벽’은 아님
 
 ]
@@ -1117,7 +1117,8 @@ async def quest(interaction: discord.Interaction):
     # 출석 여부
     attendance_all = await aget_attendance_data()
     attendance = attendance_all.get(uid, {})
-    attended = last_date == today
+    last_date = attendance.get("last_date")
+    attended = (last_date == today)
     attendance_status = f"상태: {'✅ 출석 완료' if attended else '❌ 출석 안됨'}"
 
     embed = discord.Embed(title="📜 퀘스트 현황", color=discord.Color.green())
