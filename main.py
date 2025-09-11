@@ -86,8 +86,8 @@ THREAD_ROLE_CHANNEL_ID = 1386685633413775416
 THREAD_ROLE_ID = 1386685631580733541
 COOLDOWN_SECONDS = 5
 VOICE_COOLDOWN = 60
-VOICE_MIN_XP = 20
-VOICE_MAX_XP = 30
+VOICE_MIN_XP = 10
+VOICE_MAX_XP = 50
 AFK_CHANNEL_IDS = [1386685633820495994]
 MISSION_EXP_REWARD = 100
 MISSION_REQUIRED_MESSAGES = 30
@@ -217,11 +217,20 @@ LEVEL_MAX = 99
 # 각 항목: (start_level, end_level, start_delta, ratio, jump_from_prev_end)
 # start_delta가 None이면 '직전 단계 마지막 Δ × jump'로 시작
 STAGES = [
-    (1, 10, 280, 1.05, 1.0),   # A: 초반 완화
-    (11, 30, None, 1.06, 1.2), # B
-    (31, 60, None, 1.08, 1.4), # C
-    (61, 85, None, 1.10, 1.6), # D
-    (86, 99, None, 1.17, 2.0), # E: 엔드게임 급상승
+    (1,   5,  240, 1.04,  1.00),
+    (6,  10,  None, 1.045, 1.10),
+    (11, 15,  None, 1.050, 1.12),
+    (16, 20,  None, 1.055, 1.12),
+    (21, 25,  None, 1.060, 1.13),
+    (26, 30,  None, 1.065, 1.13),
+    (31, 35,  None, 1.070, 1.14),
+    (36, 40,  None, 1.075, 1.14),
+    (41, 45,  None, 1.080, 1.15),
+    (46, 50,  None, 1.085, 1.15),
+    (51, 60,  None, 1.090, 1.16),
+    (61, 70,  None, 1.095, 1.17),  # 60~70 완충: 61레벨 벽 완화
+    (71, 85,  None, 1.105, 1.20),  # 고레벨 진입
+    (86, 99,  None, 1.130, 1.38),  # 엔드게임
 ]
 
 def _build_piecewise_geometric_deltas(stages, Lmax):
@@ -641,7 +650,7 @@ async def on_message(message):
         now_ts = time.time()
 
         if now_ts - user_data.get("last_activity", 0) >= COOLDOWN_SECONDS:
-            gain = random.randint(1, 6)
+            gain = random.randint(1, 30)
             user_data["exp"] += gain
             user_data["last_activity"] = now_ts
             try:
@@ -659,33 +668,32 @@ async def on_message(message):
         await asave_user_exp(uid, user_data)
 
         # 4) 텍스트 미션 집계 (지정 채널만)
-        if message.channel.id == TARGET_TEXT_CHANNEL_ID:
-            mission_data = await aload_mission_data()
-            exp_data = await aload_exp_data()
-            uid = str(message.author.id)
-            today = datetime.now(KST).strftime("%Y-%m-%d")
-            user_m = mission_data.get(uid, {"date": today, "text": {"count": 0, "completed": False}, "repeat_vc": {"minutes": 0}})
+        mission_data = await aload_mission_data()
+        exp_data = await aload_exp_data()
+        uid = str(message.author.id)
+        today = datetime.now(KST).strftime("%Y-%m-%d")
+        user_m = mission_data.get(uid, {"date": today, "text": {"count": 0, "completed": False}, "repeat_vc": {"minutes": 0}})
 
-            if user_m["date"] != today:
-                user_m = {"date": today, "text": {"count": 0, "completed": False}, "repeat_vc": {"minutes": 0}}
+        if user_m["date"] != today:
+            user_m = {"date": today, "text": {"count": 0, "completed": False}, "repeat_vc": {"minutes": 0}}
 
-            if not user_m["text"]["completed"]:
-                user_m["text"]["count"] += 1
-                if user_m["text"]["count"] >= MISSION_REQUIRED_MESSAGES:
-                    ue = exp_data.get(uid, {"exp": 0, "level": 1})
-                    ue["exp"] += MISSION_EXP_REWARD
-                    ue["level"] = calculate_level(ue["exp"])
-                    exp_data[uid] = ue
-                    await asave_exp_data(exp_data)
+        if not user_m["text"]["completed"]:
+            user_m["text"]["count"] += 1
+            if user_m["text"]["count"] >= MISSION_REQUIRED_MESSAGES:
+                ue = exp_data.get(uid, {"exp": 0, "level": 1})
+                 ue["exp"] += MISSION_EXP_REWARD
+                 ue["level"] = calculate_level(ue["exp"])
+                exp_data[uid] = ue
+                 await asave_exp_data(exp_data)
 
-                    log_ch = bot.get_channel(LOG_CHANNEL_ID)
-                    if log_ch:
-                        await log_ch.send(f"[🧾 로그] {message.author.display_name} 님 텍스트 미션 완료! +{MISSION_EXP_REWARD}XP")
-                    await message.channel.send(f"🎯 {message.author.mention} 일일 미션 완료! +{MISSION_EXP_REWARD}XP 지급되었습니다.")
-                    user_m["text"]["completed"] = True
+                 log_ch = bot.get_channel(LOG_CHANNEL_ID)
+                if log_ch:
+                     await log_ch.send(f"[🧾 로그] {message.author.display_name} 님 텍스트 미션 완료! +{MISSION_EXP_REWARD}XP")
+                 await message.channel.send(f"🎯 {message.author.mention} 일일 미션 완료! +{MISSION_EXP_REWARD}XP 지급되었습니다.")
+                user_m["text"]["completed"] = True
 
-            mission_data[uid] = user_m
-            await asave_user_mission(uid, user_m)
+        mission_data[uid] = user_m
+        await asave_user_mission(uid, user_m)
 
     except Exception as e:
         print(f"❌ on_message 처리 중 오류: {e}")
