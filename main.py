@@ -681,15 +681,15 @@ async def on_message(message):
             user_m["text"]["count"] += 1
             if user_m["text"]["count"] >= MISSION_REQUIRED_MESSAGES:
                 ue = exp_data.get(uid, {"exp": 0, "level": 1})
-                 ue["exp"] += MISSION_EXP_REWARD
-                 ue["level"] = calculate_level(ue["exp"])
+                ue["exp"] += MISSION_EXP_REWARD
+                ue["level"] = calculate_level(ue["exp"])
                 exp_data[uid] = ue
-                 await asave_exp_data(exp_data)
+                await asave_exp_data(exp_data)
 
-                 log_ch = bot.get_channel(LOG_CHANNEL_ID)
+                log_ch = bot.get_channel(LOG_CHANNEL_ID)
                 if log_ch:
                      await log_ch.send(f"[🧾 로그] {message.author.display_name} 님 텍스트 미션 완료! +{MISSION_EXP_REWARD}XP")
-                 await message.channel.send(f"🎯 {message.author.mention} 일일 미션 완료! +{MISSION_EXP_REWARD}XP 지급되었습니다.")
+                await message.channel.send(f"🎯 {message.author.mention} 일일 미션 완료! +{MISSION_EXP_REWARD}XP 지급되었습니다.")
                 user_m["text"]["completed"] = True
 
         mission_data[uid] = user_m
