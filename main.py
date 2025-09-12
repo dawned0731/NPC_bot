@@ -80,6 +80,7 @@ EXP_PATH = "data/exp.json"
 MISSION_PATH = "data/mission.json"
 LOG_CHANNEL_ID = 1386685633136820248
 INACTIVE_LOG_CHANNEL_ID = 1386685633136820247
+INACTIVE_KICK_DAYS = 30  # 원하는 기준일로
 LEVELUP_ANNOUNCE_CHANNEL = 1386685634462093332
 TARGET_TEXT_CHANNEL_ID = 1386685633413775416
 THREAD_ROLE_CHANNEL_ID = 1386685633413775416
@@ -142,6 +143,17 @@ async def aget_attendance_data():
 async def aset_attendance_data(user_id, data):
     return await asyncio.to_thread(set_attendance_data, user_id, data)
 
+async def aget_user_exp(uid: str):
+    def _get():
+        return db.reference("exp_data").child(uid).get() or {"exp": 0, "level": 1, "voice_minutes": 0}
+    return await asyncio.to_thread(_get)
+
+async def aget_user_mission(uid: str, today: str):
+    def _get():
+        base = {"date": today, "text": {"count": 0, "completed": False}, "repeat_vc": {"minutes": 0}}
+        val = db.reference("mission_data").child(uid).get()
+        return val or base
+    return await asyncio.to_thread(_get)
 
 
 def load_exp_data():
@@ -356,7 +368,7 @@ async def update_role_and_nick(member: discord.Member, new_level: int):
         return  # 이미 5분 이내에 업데이트 했으므로 스킵
 
     recent_role_updates.add(uid)
-    asyncio.get_event_loop().call_later(300, recent_role_updates.remove, uid)
+    asyncio.get_event_loop().call_later(300, lambda: recent_role_updates.discard(uid))
 
     # 1) 기존 레벨 역할 제거
     for role in member.roles:
@@ -417,7 +429,7 @@ async def on_ready():
 
     print(f"✅ {bot.user} 온라인")
     logging.info(f"[ready] logged in as {bot.user} (id={bot.user.id})")
-    await bot.change_presence(activity=discord.Game("부팅 점검 중"))
+    await bot.change_presence(activity=discord.Game("제가 오프라인이라면, 서버장에게 말해주세요!"))
     
     # 3) 슬래시 커맨드 동기화: 최초 1회만
     if not getattr(bot, "_synced", False):
@@ -483,7 +495,7 @@ async def on_member_update(before, after):
 async def inactive_user_log_task():
     """5일 미접속 사용자 추방 + 로그"""
     exp_data = await aload_exp_data()
-    threshold = datetime.now(KST) - timedelta(days=5)
+    threshold = datetime.now(KST) - timedelta(days=INACTIVE_KICK_DAYS)
     log_channel = bot.get_channel(INACTIVE_LOG_CHANNEL_ID)
 
     if not log_channel:
@@ -509,13 +521,15 @@ async def inactive_user_log_task():
                     embed = discord.Embed(
                         title="📢 사계절, 그 사이 서버 안내",
                         description=(
-                            "안녕하세요, '사계절, 그 사이' 서버 관리자입니다.\n\n"
-                            "최근 5일간 서버에 기록된 활동 내역이 없어,\n"
+                            "안녕하세요, '사계절, 그 사이' 서버 서버장입니다!\n\n"
+                            f"최근 {INACTIVE_KICK_DAYS}일간 서버에 기록된 활동 내역이 없어,\n"
                             "공지해둔 규칙 사항에 따라 서버에서 추방 처리가 진행됩니다 !\n\n"
-                            "개인 사정에 의해, 혹은 기록 누락 등 피치 못할 사정으로 추방되신 분들은\n"
-                            "아래의 링크를 통해 언제든 다시 서버에 입장하실 수 있습니다.\n"
-                            "앞으로 더 활발히 활동해 주시면 감사하겠습니다 !\n\n"
+                            "개인 사정에 의해, 혹은 기록 누락 등 피치 못할 사정으로 추방되신 분들,\n"
+                            "잠깐 다른 서버나 현생으로 인해 저희 서버를 깜박하셨던 분들 모두\n"
+                            "아래의 링크를 통해 언제든 다시 서버에 입장하실 수 있습니다.\n\n"
+                            "분명, 지나온 계절보다 앞으로 계절이 더 재밌을거에요.\n\n"
                             "👉 https://discord.gg/Npuxrkf38G\n\n"
+                            "앞으로 더 발전하는 서버로 찾아뵙겠습니다 !\n\n"
                             "- '사계절, 그 사이' 서버장 새벽녘 (새벽녘#0001) -"
                         ),
                         color=0x3498db
@@ -526,15 +540,15 @@ async def inactive_user_log_task():
 
                 # 추방
                 try:
-                    await member.kick(reason="5일 미접속 자동 추방")
-                    await log_channel.send(f"👢 {member.display_name} 님이 5일간 미접속으로 추방되었습니다.")
+                    await member.kick(reason=f"{INACTIVE_KICK_DAYS}일 미접속 자동 추방")
+                    await log_channel.send(f"👢 {member.display_name} 님이 {INACTIVE_KICK_DAYS}일간 미접속으로 추방되었습니다.")
                     kicked.append(member.display_name)
                 except Exception as e:
                     await log_channel.send(f"❌ {member.display_name} 님 추방 실패: {e}")
 
     # ✅ 아무도 추방되지 않았을 경우에도 로그 남기기
     if not kicked:
-        await log_channel.send("✅ 현재 5일 이상 미접속 중인 사용자가 없습니다.")
+        await log_channel.send(f"✅ 현재 {INACTIVE_KICK_DAYS}일 이상 미접속 중인 사용자가 없습니다.")
 
 @tasks.loop(time=dtime(hour=15, minute=0))
 async def reset_daily_missions():
@@ -650,56 +664,48 @@ async def on_message(message):
                 await message.author.add_roles(role)
 
         # 2) 채팅 경험치 처리 로직
-        exp_data = await aload_exp_data()
         uid = str(message.author.id)
-        user_data = exp_data.get(uid, {"exp": 0, "level": 1, "voice_minutes": 0})
         now_ts = time.time()
+        user_data = await aget_user_exp(uid)
 
         if now_ts - user_data.get("last_activity", 0) >= COOLDOWN_SECONDS:
             gain = random.randint(1, 30)
             user_data["exp"] += gain
             user_data["last_activity"] = now_ts
-            try:
-                if message.author.id != message.guild.owner_id:
-                    await message.author.edit(nick=generate_nickname(message.author.display_name, user_data["level"]))
-            except:
-                pass
 
         # 3) 레벨업 분기
         new_level = calculate_level(user_data["exp"])
-        if new_level != user_data["level"]:
+        if new_level != user_data.get("level", 1):
             user_data["level"] = new_level
             await update_role_and_nick(message.author, new_level)
 
-        await asave_user_exp(uid, user_data)
 
-        # 4) 텍스트 미션 집계 (지정 채널만)
-        mission_data = await aload_mission_data()
-        exp_data = await aload_exp_data()
-        uid = str(message.author.id)
+        # 4) 텍스트 미션 집계 (유저 단일 로드/저장)
         today = datetime.now(KST).strftime("%Y-%m-%d")
-        user_m = mission_data.get(uid, {"date": today, "text": {"count": 0, "completed": False}, "repeat_vc": {"minutes": 0}})
+        user_m = await aget_user_mission(uid, today)
 
-        if user_m["date"] != today:
+        if user_m.get("date") != today:
             user_m = {"date": today, "text": {"count": 0, "completed": False}, "repeat_vc": {"minutes": 0}}
 
         if not user_m["text"]["completed"]:
             user_m["text"]["count"] += 1
             if user_m["text"]["count"] >= MISSION_REQUIRED_MESSAGES:
-                ue = exp_data.get(uid, {"exp": 0, "level": 1})
-                ue["exp"] += MISSION_EXP_REWARD
-                ue["level"] = calculate_level(ue["exp"])
-                exp_data[uid] = ue
-                await asave_exp_data(exp_data)
+                # 유저 EXP에 바로 반영(메모리 상)
+                user_data["exp"] += MISSION_EXP_REWARD
+                user_data["level"] = calculate_level(user_data["exp"])
+                user_data["last_activity"] = time.time()  # ← (정책 선택) 미션 완료도 활동으로 간주하려면 유지, 아니면 제거
 
                 log_ch = bot.get_channel(LOG_CHANNEL_ID)
                 if log_ch:
-                     await log_ch.send(f"[🧾 로그] {message.author.display_name} 님 텍스트 미션 완료! +{MISSION_EXP_REWARD}XP")
+                    await log_ch.send(f"[🧾 로그] {message.author.display_name} 님 텍스트 미션 완료! +{MISSION_EXP_REWARD}XP")
                 await message.channel.send(f"🎯 {message.author.mention} 일일 미션 완료! +{MISSION_EXP_REWARD}XP 지급되었습니다.")
                 user_m["text"]["completed"] = True
 
-        mission_data[uid] = user_m
+        # (중요) 전체 저장 제거 → 유저 단위 저장만
         await asave_user_mission(uid, user_m)
+
+        # ✅ 최종 EXP 저장 1회 (on_message 맨 끝에서 저장)
+        await asave_user_exp(uid, user_data)
 
     except Exception as e:
         print(f"❌ on_message 처리 중 오류: {e}")
@@ -720,12 +726,12 @@ async def on_message(message):
                 if not first_time_str:
                     ts_map[uid] = now.isoformat()
                     cur["timestamps"] = ts_map
-                    cnts[uid] = 1                   # ✅ 첫 기록은 1로 시작
+                    cnts[uid] = 1                   #  첫 기록은 1로 시작
                 else:
                     first_time = datetime.fromisoformat(first_time_str)
                     if now - first_time > timedelta(hours=24):
                         cur["timestamps"][uid] = now.isoformat()
-                        cnts[uid] = 1               # ✅ 하루 경과했으면 리셋 후 1
+                        cnts[uid] = 1               #  하루 경과했으면 리셋 후 1
                     else:
                         cnts[uid] = cnts.get(uid, 0) + 1
 
