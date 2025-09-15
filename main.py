@@ -98,6 +98,7 @@ REPEAT_VC_MIN_PEOPLE = 5
 SPECIAL_VC_CATEGORY_IDS = [1386685633820495991]
 ATTENDANCE_DB_KEY = "attendance_data"
 HIDDEN_QUEST_KEY = "hidden_quest_data"  # 히든 퀘스트 저장 키
+ALLOW_NO_PING = discord.AllowedMentions.none()
 quest_id = 1
 QUEST_NAMES = {1: "아니시에이팅", 2: "감사한 마음", 3: "파푸 애호가"}
 
@@ -602,7 +603,10 @@ async def voice_xp_task():
                     # 레벨업 알림 유지
                     announce = bot.get_channel(LEVELUP_ANNOUNCE_CHANNEL)
                     if announce:
-                        await announce.send(f"🎉 {member.mention} 님이 Lv.{new_level} 에 도달했습니다! 🎊")
+                        await announce.send(
+                            f"🎉 {member.mention} 님이 Lv.{new_level} 에 도달했습니다! 🎊",
+                            allowed_mentions=ALLOW_NO_PING
+                        )
 
                 await asave_user_exp(uid, user_data)
 
@@ -1024,7 +1028,10 @@ async def grant_xp(interaction: discord.Interaction, member: discord.Member, amo
         # 레벨업 알림
         ch_log = bot.get_channel(LEVELUP_ANNOUNCE_CHANNEL)
         if ch_log:
-            await ch_log.send(f"🎉 {member.mention} 님이 Lv.{new_level} 에 도달했습니다! 🎊")
+            await ch_log.send(
+                f"🎉 {member.mention} 님이 Lv.{new_level} 에 도달했습니다! 🎊",
+                allowed_mentions=ALLOW_NO_PING
+            )
 
     await asave_user_exp(uid, user_data)
     await interaction.response.send_message(f"✅ {member.mention}에게 경험치 {amount}XP 지급 완료!", ephemeral=True)
@@ -1198,7 +1205,10 @@ async def attend(interaction: discord.Interaction):
     if ue["level"] > prev_level:
         announce = bot.get_channel(LEVELUP_ANNOUNCE_CHANNEL)
         if announce:
-            await announce.send(f"🎉 {interaction.user.mention} 님이 Lv.{ue['level']} 에 도달했습니다! 🎊")
+            await announce.send(
+                f"🎉 {interaction.user.mention} 님이 Lv.{ue['level']} 에 도달했습니다! 🎊",
+                allowed_mentions=ALLOW_NO_PING
+            )
 
 
     await asave_user_exp(uid, ue)
