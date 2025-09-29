@@ -1132,35 +1132,49 @@ async def quest(interaction: discord.Interaction):
 
 @bot.tree.command(name="랭킹", description="경험치 랭킹을 확인합니다.")
 async def ranking(interaction: discord.Interaction):
-    # 경험치 기준 상위 10명 정렬
-    sorted_users = sorted(exp_data.items(), key=lambda x: x[1].get("exp", 0), reverse=True)
-    
+    # 전체 EXP 데이터 1회 로드 (읽기 전용)
+    data = await aload_exp_data()
+    if not isinstance(data, dict):
+        data = {}
+
+    # 경험치 기준 상위 정렬
+    sorted_users = sorted(
+        data.items(),
+        key=lambda x: x[1].get("exp", 0),
+        reverse=True
+    )
+
+    # 상위 10명 라인 생성
     desc_lines = []
-    for idx, (uid, data) in enumerate(sorted_users[:10], start=1):
+    for idx, (uid, u) in enumerate(sorted_users[:10], start=1):
         try:
             member = await interaction.guild.fetch_member(int(uid))
             name = member.display_name
         except:
             name = "Unknown"
-        desc_lines.append(f"{idx}위. {name} - Lv. {data.get('level',1)} ({data.get('exp',0)} XP)")
-    
-    # 내 순위 찾기
+        level = u.get("level", 1)
+        exp = u.get("exp", 0)
+        desc_lines.append(f"{idx}위. {name} - Lv. {level} ({exp:,} XP)")
+
+    # 내 순위
     my_rank = None
-    for idx, (uid, data) in enumerate(sorted_users, start=1):
-        if uid == str(interaction.user.id):
-            my_rank = f"당신의 순위: {idx}위 - Lv. {data.get('level',1)} ({data.get('exp',0)} XP)"
+    me = str(interaction.user.id)
+    for idx, (uid, u) in enumerate(sorted_users, start=1):
+        if uid == me:
+            my_rank = f"당신의 순위: {idx}위 - Lv. {u.get('level',1)} ({u.get('exp',0):,} XP)"
             break
 
-    # Embed 생성
+    # Embed
     embed = discord.Embed(
         title="🏆 경험치 랭킹",
-        description="\n".join(desc_lines),
+        description="\n".join(desc_lines) if desc_lines else "랭킹 데이터가 없습니다.",
         color=discord.Color.gold()
     )
     if my_rank:
         embed.add_field(name="📍 내 순위", value=my_rank, inline=False)
 
     await interaction.response.send_message(embed=embed)
+
 
 
 @bot.tree.command(name="출석", description="오늘의 출석을 기록합니다.")
@@ -1184,8 +1198,7 @@ async def attend(interaction: discord.Interaction):
     ud.setdefault("monthly", {})[month] = ud["monthly"].get(month,0)+1
     # 경험치 지급
     gain = 100 + min(ud["streak"] - 1, 10) * 10
-    expd = await aload_exp_data()
-    ue = expd.get(uid,{"exp":0,"level":1,"voice_minutes":0})
+    ue = await aget_user_exp(uid)
     prev_level = ue["level"]
     ue["exp"] += gain
     ue["level"] = calculate_level(ue["exp"])
