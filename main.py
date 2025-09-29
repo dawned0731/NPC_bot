@@ -601,7 +601,7 @@ async def voice_xp_task():
                     announce = bot.get_channel(LEVELUP_ANNOUNCE_CHANNEL)
                     if announce:
                         await announce.send(
-                            f"🎉 {member.dispaly_name} 님이 Lv.{new_level} 에 도달했습니다! 🎊",
+                            f"🎉 {member.display_name} 님이 Lv.{new_level} 에 도달했습니다! 🎊",
                             allowed_mentions=ALLOW_NO_PING
                         )
 
@@ -739,7 +739,7 @@ async def on_message(message):
                 if cnts[uid] >= 50:
                     cur["completed"] = True
                     cur["winner"] = uid
-                    cur["completed_at"] = datetime.now(KST).strftime("%Y. %-m. %-d %H:%M")
+                    cur["completed_at"] = datetime.now(KST).strftime("%Y.%m.%d %H:%M")
             return cur
 
         result = ref_hq.transaction(txn)
@@ -1195,7 +1195,7 @@ async def attend(interaction: discord.Interaction):
         h, m = divmod(int(until.total_seconds()/60), 60)
         return await interaction.response.send_message(f"이미 출석 완료! 다음 출석까지 {h}시간 {m}분 남음.")
         
-    ud["streak"] = ud["streak"] + 1 if ud["last_date"] == yesterday else 1
+    ud["streak"] = ud["streak"] + 1 if prev_last == yesterday else 1
     ud["last_date"] = today_str
     ud["total_days"] += 1
     ud.setdefault("weekly", {})[week] = ud["weekly"].get(week,0)+1
@@ -1212,7 +1212,7 @@ async def attend(interaction: discord.Interaction):
         announce = bot.get_channel(LEVELUP_ANNOUNCE_CHANNEL)
         if announce:
             await announce.send(
-                f"🎉 {interaction.user.mention} 님이 Lv.{ue['level']} 에 도달했습니다! 🎊",
+                f"🎉 {interaction.user.display_name} 님이 Lv.{ue['level']} 에 도달했습니다! 🎊",
                 allowed_mentions=ALLOW_NO_PING
             )
 
