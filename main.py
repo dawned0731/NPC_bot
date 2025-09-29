@@ -470,9 +470,8 @@ async def on_member_update(before, after):
             )
 
         # DB에서 경험치, 레벨 로드 후 역할/닉네임 동기화
-        exp_data = await aload_exp_data()
         uid = str(after.id)
-        user_data = exp_data.get(uid, {"exp": 0, "level": 1, "voice_minutes": 0})
+        user_data = await aget_user_exp(uid)
         new_level = calculate_level(user_data["exp"])
         
         # 기존 레벨 역할 제거
@@ -495,7 +494,6 @@ async def on_member_update(before, after):
 @tasks.loop(hours=24)
 async def inactive_user_log_task():
     """5일 미접속 사용자 추방 + 로그"""
-    exp_data = await aload_exp_data()
     threshold = datetime.now(KST) - timedelta(days=INACTIVE_KICK_DAYS)
     log_channel = bot.get_channel(INACTIVE_LOG_CHANNEL_ID)
 
@@ -511,7 +509,7 @@ async def inactive_user_log_task():
             if any(r.id in EXEMPT_ROLE_IDS for r in member.roles):
                 continue
 
-            user = exp_data.get(str(member.id))
+            user = await aget_user_exp(str(member.id))
             if not user or not user.get("last_activity"):
                 continue
 
@@ -569,7 +567,6 @@ async def reset_daily_missions():
 async def voice_xp_task():
     """음성 채널 경험치 태스크"""
     now_ts = time.time()
-    exp_data = await aload_exp_data()
 
     for guild in bot.guilds:
         for vc in guild.voice_channels:
@@ -582,7 +579,7 @@ async def voice_xp_task():
                     continue
 
                 uid = str(member.id)
-                user_data = exp_data.get(uid, {"exp": 0, "level": 1, "voice_minutes": 0})
+                user_data = await aget_user_exp(uid)
                 gain = random.randint(VOICE_MIN_XP, VOICE_MAX_XP)
                 if is_special:
                     gain = max(1, int(gain * 0.2))
@@ -615,7 +612,6 @@ async def voice_xp_task():
 async def repeat_vc_mission_task():
     """반복 VC 미션 보상 태스크"""
     mission_data = await aload_mission_data()
-    exp_data = await aload_exp_data()
     today = datetime.now(KST).strftime("%Y-%m-%d")
 
     for guild in bot.guilds:
@@ -634,7 +630,7 @@ async def repeat_vc_mission_task():
 
                 user_m["repeat_vc"]["minutes"] += 1
                 if user_m["repeat_vc"]["minutes"] % REPEAT_VC_REQUIRED_MINUTES == 0:
-                    uexp = exp_data.get(uid, {"exp": 0, "level": 1})
+                    uexp = await aget_user_exp(uid)
                     uexp["exp"] += REPEAT_VC_EXP_REWARD
                     uexp["level"] = calculate_level(uexp["exp"])
                     uexp["last_activity"] = time.time()
@@ -652,7 +648,6 @@ async def repeat_vc_mission_task():
         save_json(MISSION_PATH, mission_data)
     except Exception as e:
         print(f"❌ 미션 로컬 백업 실패: {e}")
-    await asave_exp_data(exp_data)
 
 
 @bot.event
@@ -944,8 +939,7 @@ async def suggest(interaction: discord.Interaction, 모드: str, 내용: str):
         # 오너 DM 전송 (실제 유저 정보 포함)
         owner = bot.get_user(OWNER_ID)
         if owner:
-            exp_data = await aload_exp_data()
-            user = exp_data.get(str(interaction.user.id), {})
+            user = await aget_user_exp(str(interaction.user.id))
             last_ts = user.get("last_activity")
             if last_ts:
                 last_dt = datetime.fromtimestamp(last_ts, KST)
@@ -987,8 +981,7 @@ async def suggest(interaction: discord.Interaction, 모드: str, 내용: str):
 @app_commands.describe(member="분석할 서버원")
 async def analyze_info(interaction: discord.Interaction, member: discord.Member):
     uid = str(member.id)
-    exp_data = await aload_exp_data()
-    user = exp_data.get(uid)
+    user  await aget_user_exp(uid)
 
     if not user:
         return await interaction.response.send_message(f"{member.display_name}님의 정보가 존재하지 않습니다.", ephemeral=True)
@@ -1014,9 +1007,8 @@ async def analyze_info(interaction: discord.Interaction, member: discord.Member)
 @app_commands.default_permissions(administrator=True)
 @bot.tree.command(name="경험치지급", description="유저에게 경험치를 지급합니다.")
 async def grant_xp(interaction: discord.Interaction, member: discord.Member, amount: int):
-    exp_data = await aload_exp_data()
     uid = str(member.id)
-    user_data = exp_data.get(uid, {"exp": 0, "level": 1})
+    user_data = await aget_user_exp(uid)
     prev_level = user_data["level"]
     user_data["exp"] += amount
     new_level = calculate_level(user_data["exp"])
@@ -1045,9 +1037,8 @@ async def deduct_xp(
     amount: int
 ):
     # 데이터 로드
-    exp_data = await aload_exp_data()
     uid = str(member.id)
-    user_data = exp_data.get(uid, {"exp": 0, "level": 1})
+    user_data = await aget_user_exp(uid)
 
     # 경험치 차감 및 레벨 재계산
     user_data["exp"] = max(0, user_data["exp"] - amount)
@@ -1086,8 +1077,7 @@ async def hidden_quest_list(interaction: discord.Interaction):
 @bot.tree.command(name="정보", description="자신의 레벨 및 경험치 정보를 확인합니다.")
 async def info(interaction: discord.Interaction):
     uid = str(interaction.user.id)
-    exp_data = await aload_exp_data()
-    user = exp_data.get(uid, {"exp": 0, "level": 1, "voice_minutes": 0})
+    user = await aget_user_exp(uid)
     current_exp = user["exp"]
     lvl = calculate_level(current_exp)
     if lvl != user["level"]:
@@ -1142,7 +1132,6 @@ async def quest(interaction: discord.Interaction):
 
 @bot.tree.command(name="랭킹", description="경험치 랭킹을 확인합니다.")
 async def ranking(interaction: discord.Interaction):
-    exp_data = await aload_exp_data()
     # 경험치 기준 상위 10명 정렬
     sorted_users = sorted(exp_data.items(), key=lambda x: x[1].get("exp", 0), reverse=True)
     
