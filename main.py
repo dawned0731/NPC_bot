@@ -404,7 +404,7 @@ intents.members = True
 intents.voice_states = True
 
 bot = commands.Bot(
-    command_prefix=None,     # 프리픽스 명령어 비활성화
+    command_prefix=commands.when_mentioned,     # 프리픽스 명령어 비활성화
     help_command=None,      # 기본 도움말 명령어 비활성화
     intents=intents
 )
@@ -493,7 +493,7 @@ async def on_member_update(before, after):
 # ---- 백그라운드 태스크 정의 ----
 @tasks.loop(hours=24)
 async def inactive_user_log_task():
-    """5일 미접속 사용자 추방 + 로그"""
+    """30일 미접속 사용자 추방 + 로그"""
     threshold = datetime.now(KST) - timedelta(days=INACTIVE_KICK_DAYS)
     log_channel = bot.get_channel(INACTIVE_LOG_CHANNEL_ID)
 
@@ -601,7 +601,7 @@ async def voice_xp_task():
                     announce = bot.get_channel(LEVELUP_ANNOUNCE_CHANNEL)
                     if announce:
                         await announce.send(
-                            f"🎉 {member.mention} 님이 Lv.{new_level} 에 도달했습니다! 🎊",
+                            f"🎉 {member.dispaly_name} 님이 Lv.{new_level} 에 도달했습니다! 🎊",
                             allowed_mentions=ALLOW_NO_PING
                         )
 
@@ -616,10 +616,11 @@ async def repeat_vc_mission_task():
 
     for guild in bot.guilds:
         for vc in guild.voice_channels:
-            if vc.id in AFK_CHANNEL_IDS or len(vc.members) < REPEAT_VC_MIN_PEOPLE:
+            humans = [m for m in vc.members if not m.bot]
+            if vc.id in AFK_CHANNEL_IDS or len(humans) < REPEAT_VC_MIN_PEOPLE:
                 continue
 
-            for member in vc.members:
+            for member in humans:
                 if member.bot:
                     continue
 
@@ -634,7 +635,7 @@ async def repeat_vc_mission_task():
                     uexp["exp"] += REPEAT_VC_EXP_REWARD
                     uexp["level"] = calculate_level(uexp["exp"])
                     uexp["last_activity"] = time.time()
-                    exp_data[uid] = uexp
+                    await asave_user_exp(uid, uexp)
 
                     log = bot.get_channel(LOG_CHANNEL_ID)
                     if log:
@@ -944,7 +945,7 @@ async def suggest(interaction: discord.Interaction, 모드: str, 내용: str):
             if last_ts:
                 last_dt = datetime.fromtimestamp(last_ts, KST)
                 days_ago = (datetime.now(KST) - last_dt).days
-                last_seen = f"{days_ago}일 전 ({last_dt.strftime('%Y-%m-%d %H:%M')})"
+                last_seen = f"{days_ago}일 전 ({last_dt.strftime('%Y.%m.%d %H:%M')})"
             else:
                 last_seen = "기록 없음"
 
@@ -981,7 +982,7 @@ async def suggest(interaction: discord.Interaction, 모드: str, 내용: str):
 @app_commands.describe(member="분석할 서버원")
 async def analyze_info(interaction: discord.Interaction, member: discord.Member):
     uid = str(member.id)
-    user  await aget_user_exp(uid)
+    user = await aget_user_exp(uid)
 
     if not user:
         return await interaction.response.send_message(f"{member.display_name}님의 정보가 존재하지 않습니다.", ephemeral=True)
@@ -1021,7 +1022,7 @@ async def grant_xp(interaction: discord.Interaction, member: discord.Member, amo
         ch_log = bot.get_channel(LEVELUP_ANNOUNCE_CHANNEL)
         if ch_log:
             await ch_log.send(
-                f"🎉 {member.mention} 님이 Lv.{new_level} 에 도달했습니다! 🎊",
+                f"🎉 {member.display_name} 님이 Lv.{new_level} 에 도달했습니다! 🎊",
                 allowed_mentions=ALLOW_NO_PING
             )
 
@@ -1187,10 +1188,13 @@ async def attend(interaction: discord.Interaction):
     month = get_month_key_kst(now)
     data = await aget_attendance_data()
     ud = data.get(uid, {"last_date":"","total_days":0,"streak":0,"weekly":{},"monthly":{}})
-    if ud["last_date"] == today_str:
+    prev_last = ud.get("last_date", "")
+
+    if prev_last == today_str:
         until = (now.replace(hour=0,minute=0,second=0,microsecond=0)+timedelta(days=1)) - now
         h, m = divmod(int(until.total_seconds()/60), 60)
         return await interaction.response.send_message(f"이미 출석 완료! 다음 출석까지 {h}시간 {m}분 남음.")
+        
     ud["streak"] = ud["streak"] + 1 if ud["last_date"] == yesterday else 1
     ud["last_date"] = today_str
     ud["total_days"] += 1
@@ -1217,7 +1221,7 @@ async def attend(interaction: discord.Interaction):
     await aset_attendance_data(uid, ud)
     await update_role_and_nick(interaction.user, ue["level"])
     first_attend = ud["total_days"] == 1
-    streak_reset = ud["streak"] == 1 and ud["last_date"] != yesterday
+    streak_reset = (ud["streak"] == 1 and prev_last != yesterday)
 
     if first_attend:
         intro = "✨ 출석! 빛나는 하루 되세요!"
