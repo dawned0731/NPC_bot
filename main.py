@@ -448,6 +448,14 @@ async def on_ready():
                 task.start()
         except Exception as e:
             print(f"[on_ready] task start error: {e!r}")
+            
+    # 5) 웹 헬스엔드포인트 시작(최초 1회)
+    if not getattr(bot, "_web_started", False):
+        try:
+            bot.loop.create_task(start_web_app())
+            bot._web_started = True
+        except Exception as e:
+            print(f"[on_ready] web start error: {e!r}")
 
 
 # ---- on_member_update: 환영 메시지 및 역할 동기화 ----
@@ -1281,22 +1289,21 @@ async def attend_ranking(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed)
 
 # ---- 실행 및 웹 서버 유지 ----
-import threading
-from flask import Flask
+from aiohttp import web
 app = Flask(__name__)
 
-@app.route("/")
-def home():
-    return "Bot is running!"
+# ---- 실행 및 웹 서버 유지 (aiohttp, same event loop) ----
+async def health(_request):
+    return web.Response(text="Bot is running!")
 
-# ---- Launcher (Flask thread) ----
-def _start_flask():
+async def start_web_app():
+    app = web.Application()
+    app.router.add_get("/", health)
+    runner = web.AppRunner(app)
+    await runner.setup()
     port = int(os.getenv("PORT", "10000"))
-    threading.Thread(
-        target=app.run,
-        kwargs={"host": "0.0.0.0", "port": port, "use_reloader": False},
-        daemon=True,
-    ).start()
+    site = web.TCPSite(runner, host="0.0.0.0", port=port)
+    await site.start()
 
 async def _safe_start():
     """
@@ -1372,6 +1379,5 @@ logging.getLogger("discord.gateway").setLevel(logging.INFO)
 logging.getLogger("discord.http").setLevel(logging.INFO)
 
 if __name__ == "__main__":
-    _start_flask()
     asyncio.run(_safe_start())
 
