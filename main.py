@@ -576,44 +576,60 @@ async def voice_xp_task():
     """음성 채널 경험치 태스크"""
     now_ts = time.time()
 
-    for guild in bot.guilds:
-        for vc in guild.voice_channels:
-            if vc.id in AFK_CHANNEL_IDS:
-                continue
+     for guild in bot.guilds:
+         # 보이스 + 스테이지 채널 모두 포함
+         try:
+             voice_like_channels = list(guild.voice_channels) + list(getattr(guild, "stage_channels", []))
+         except Exception:
+             voice_like_channels = list(guild.voice_channels)
+ 
+         for vc in voice_like_channels:
+             if vc.id in AFK_CHANNEL_IDS:
+                 continue
+
 
             is_special = vc.category and vc.category.id in SPECIAL_VC_CATEGORY_IDS
             for member in vc.members:
                 if member.bot:
                     continue
+                try:
+                    uid = str(member.id)
+                    user_data = await aget_user_exp(uid)
 
-                uid = str(member.id)
-                user_data = await aget_user_exp(uid)
-                gain = random.randint(VOICE_MIN_XP, VOICE_MAX_XP)
-                if is_special:
-                    gain = max(1, int(gain * 0.2))
+                    # 안전 보정: 낡은 레코드 방어
+                    user_data.setdefault("exp", 0)
+                    user_data.setdefault("voice_minutes", 0)
+                    user_data.setdefault("level", calculate_level(user_data.get("exp", 0)))
 
-                user_data["exp"] += gain
-                if not is_special:
-                    user_data["voice_minutes"] += 1
+                    gain = random.randint(VOICE_MIN_XP, VOICE_MAX_XP)
+                    if is_special:
+                        gain = max(1, int(gain * 0.2))
 
-                user_data["last_activity"] = now_ts
-                new_level = calculate_level(user_data["exp"])
+                    user_data["exp"] += gain
+                    if not is_special:
+                        user_data["voice_minutes"] += 1
 
-                if new_level != user_data["level"]:
-                    user_data["level"] = new_level
+                    user_data["last_activity"] = now_ts
+                    new_level = calculate_level(user_data["exp"])
 
-                    # 역할·닉네임 변경 (데바운스 적용)
-                    await update_role_and_nick(member, new_level)
+                    if new_level != user_data.get("level", 1):
+                        user_data["level"] = new_level
 
-                    # 레벨업 알림 유지
-                    announce = bot.get_channel(LEVELUP_ANNOUNCE_CHANNEL)
-                    if announce:
-                        await announce.send(
-                            f"🎉 {member.display_name} 님이 Lv.{new_level} 에 도달했습니다! 🎊",
-                            allowed_mentions=ALLOW_NO_PING
-                        )
+                        # 역할·닉네임 변경 (데바운스 적용)
+                        await update_role_and_nick(member, new_level)
 
-                await asave_user_exp(uid, user_data)
+                        # 레벨업 알림 유지
+                        announce = bot.get_channel(LEVELUP_ANNOUNCE_CHANNEL)
+                        if announce:
+                            await announce.send(
+                                f"🎉 {member.display_name} 님이 Lv.{new_level} 에 도달했습니다! 🎊",
+                                allowed_mentions=ALLOW_NO_PING
+                            )
+
+                    await asave_user_exp(uid, user_data)
+                except Exception as e:
+                    logging.exception(f"[voice_xp_task] uid={getattr(member, 'id', '?')} error: {e}")
+                    continue
 
 
 @tasks.loop(seconds=60)
@@ -622,10 +638,23 @@ async def repeat_vc_mission_task():
     mission_data = await aload_mission_data()
     today = datetime.now(KST).strftime("%Y-%m-%d")
 
-    for guild in bot.guilds:
-        for vc in guild.voice_channels:
-            humans = [m for m in vc.members if not m.bot]
-            if vc.id in AFK_CHANNEL_IDS or len(humans) < REPEAT_VC_MIN_PEOPLE:
+     for guild in bot.guilds:
+         # 보이스 + 스테이지 채널 모두 포함
+         voice_like_channels = list(guild.voice_channels) + list(getattr(guild, "stage_channels", []))
+         for vc in voice_like_channels:
+             humans = [m for m in vc.members if not m.bot]
+
+            # 🅰 AFK 채널은 미션 지급 제외 (이유 로그)
+            if vc.id in AFK_CHANNEL_IDS:
+                logging.debug(f"[repeat_vc_mission] skip AFK vc_id={vc.id}")
+                continue
+
+            # 🅱 인원 수 미달 시 미션 지급 제외 (이유 로그)
+            if len(humans) < REPEAT_VC_MIN_PEOPLE:
+                logging.debug(
+                    f"[repeat_vc_mission] skip not enough people vc_id={vc.id} "
+                    f"count={len(humans)}/{REPEAT_VC_MIN_PEOPLE}"
+                )
                 continue
 
             for member in humans:
@@ -1290,7 +1319,6 @@ async def attend_ranking(interaction: discord.Interaction):
 
 # ---- 실행 및 웹 서버 유지 ----
 from aiohttp import web
-app = Flask(__name__)
 
 # ---- 실행 및 웹 서버 유지 (aiohttp, same event loop) ----
 async def health(_request):
