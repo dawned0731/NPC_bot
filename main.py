@@ -635,11 +635,11 @@ async def repeat_vc_mission_task():
     mission_data = await aload_mission_data()
     today = datetime.now(KST).strftime("%Y-%m-%d")
 
-     for guild in bot.guilds:
+    for guild in bot.guilds:
          # 보이스 + 스테이지 채널 모두 포함
-         voice_like_channels = list(guild.voice_channels) + list(getattr(guild, "stage_channels", []))
-         for vc in voice_like_channels:
-             humans = [m for m in vc.members if not m.bot]
+        voice_like_channels = list(guild.voice_channels) + list(getattr(guild, "stage_channels", []))
+        for vc in voice_like_channels:
+            humans = [m for m in vc.members if not m.bot]
 
             # 🅰 AFK 채널은 미션 지급 제외 (이유 로그)
             if vc.id in AFK_CHANNEL_IDS:
