@@ -570,23 +570,21 @@ async def reset_daily_missions():
         # 오류 발생 시 로그 채널에 알림하거나 콘솔에 에러 기록
         print(f"❌ 일일 미션 초기화 실패: {e}")
 
-
 @tasks.loop(seconds=VOICE_COOLDOWN)
 async def voice_xp_task():
     """음성 채널 경험치 태스크"""
     now_ts = time.time()
 
-     for guild in bot.guilds:
-         # 보이스 + 스테이지 채널 모두 포함
-         try:
-             voice_like_channels = list(guild.voice_channels) + list(getattr(guild, "stage_channels", []))
-         except Exception:
-             voice_like_channels = list(guild.voice_channels)
- 
-         for vc in voice_like_channels:
-             if vc.id in AFK_CHANNEL_IDS:
-                 continue
+    for guild in bot.guilds:
+        # 보이스 + 스테이지 채널 모두 포함
+        try:
+            voice_like_channels = list(guild.voice_channels) + list(getattr(guild, "stage_channels", []))
+        except Exception:
+            voice_like_channels = list(guild.voice_channels)
 
+        for vc in voice_like_channels:
+            if vc.id in AFK_CHANNEL_IDS:
+                continue
 
             is_special = vc.category and vc.category.id in SPECIAL_VC_CATEGORY_IDS
             for member in vc.members:
@@ -630,8 +628,7 @@ async def voice_xp_task():
                 except Exception as e:
                     logging.exception(f"[voice_xp_task] uid={getattr(member, 'id', '?')} error: {e}")
                     continue
-
-
+                    
 @tasks.loop(seconds=60)
 async def repeat_vc_mission_task():
     """반복 VC 미션 보상 태스크"""
