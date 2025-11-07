@@ -369,7 +369,7 @@ async def update_role_and_nick(member: discord.Member, new_level: int):
         return  # 이미 5분 이내에 업데이트 했으므로 스킵
 
     recent_role_updates.add(uid)
-    asyncio.get_event_loop().call_later(300, recent_role_updates.remove, uid)
+    asyncio.get_event_loop().call_later(300, lambda: recent_role_updates.discard(uid))
 
     # 1) 기존 레벨 역할 제거
     for role in member.roles:
@@ -474,28 +474,20 @@ async def on_member_update(before, after):
         if channel:
             await channel.send(
                 f"환영합니다 {after.mention} 님! '사계절, 그 사이' 서버입니다.\n"
-                "프로필 우클릭 → 편집으로 닉네임을 변경할 수 있어요!"
+                "프로필 우클릭 → 편집으로 닉네임을 변경할 수 있어요!\n"
+                "닉네임은 한글만 사용 가능합니다!"
             )
 
         # DB에서 경험치, 레벨 로드 후 역할/닉네임 동기화
         uid = str(after.id)
         user_data = await aget_user_exp(uid)
         new_level = calculate_level(user_data["exp"])
-        
-        # 기존 레벨 역할 제거
-        for role in after.roles:
-            if role.id in ROLE_IDS:
-                await after.remove_roles(role)
-        
-        # 새 역할 부여
-        role_id = get_role_for_level(new_level)
-        new_role = after.guild.get_role(role_id)
-        if new_role:
-            await after.add_roles(new_role)
-        
-        # 닉네임 갱신
-        if after.id != after.guild.owner_id:
-            await after.edit(nick=generate_nickname(after.display_name, new_level))
+
+        # 역할/닉네임 동기화 (데바운스 적용 + 예외 내성)
+        try:
+            await update_role_and_nick(after, new_level)
+        except Exception as e:
+            logging.exception(f"[on_member_update] role/nick sync failed: {e}")
 
 
 # ---- 백그라운드 태스크 정의 ----
@@ -687,7 +679,6 @@ async def repeat_vc_mission_task():
 
                 mission_data[uid] = user_m
 
-    await asave_mission_data(mission_data)
     # 로컬 JSON에도 백업
     try:
         save_json(MISSION_PATH, mission_data)
