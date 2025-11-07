@@ -369,7 +369,7 @@ async def update_role_and_nick(member: discord.Member, new_level: int):
         return  # 이미 5분 이내에 업데이트 했으므로 스킵
 
     recent_role_updates.add(uid)
-    asyncio.get_event_loop().call_later(300, lambda: recent_role_updates.discard(uid))
+    asyncio.get_event_loop().call_later(300, recent_role_updates.remove, uid)
 
     # 1) 기존 레벨 역할 제거
     for role in member.roles:
@@ -628,7 +628,17 @@ async def voice_xp_task():
                 except Exception as e:
                     logging.exception(f"[voice_xp_task] uid={getattr(member, 'id', '?')} error: {e}")
                     continue
-                    
+
+@voice_xp_task.error
+async def voice_xp_task_error(error):
+    logging.exception(f"[voice_xp_task] crashed: {error}")
+    try:
+        # 예외로 루프가 중지됐으면 재시작 시도
+        if not voice_xp_task.is_running():
+            voice_xp_task.start()
+    except Exception as e2:
+        logging.exception(f"[voice_xp_task] restart failed: {e2}")
+        
 @tasks.loop(seconds=60)
 async def repeat_vc_mission_task():
     """반복 VC 미션 보상 태스크"""
@@ -744,122 +754,66 @@ async def on_message(message):
     except Exception as e:
         print(f"❌ on_message 처리 중 오류: {e}")
 
-    # ---- 히든 퀘스트 진행 처리 ----
-    # 메시지에 '아니' 키워드가 포함된 경우에만 트랜잭션 실행
-    if "아니" in message.content:
-        ref_hq = db.reference(f"{HIDDEN_QUEST_KEY}/1")
-        def txn(cur):
-            cur = hidden_quest_txn(cur)
-            cnts = cur.get("counts", {})
-            if not cur["completed"] and "아니" in message.content:
-                uid = str(message.author.id)
-                now = datetime.now(KST)
-                ts_map = cur.get("timestamps", {})
-                first_time_str = ts_map.get(uid)
+    try:
+        # ---- 히든 퀘스트 진행 처리 ----
+        # 메시지에 '아니' 키워드가 포함된 경우에만 트랜잭션 실행
+        if "아니" in message.content:
+            ref_hq = db.reference(f"{HIDDEN_QUEST_KEY}/1")
+            def txn(cur):
+                cur = hidden_quest_txn(cur)
+                user_key = str(message.author.id)
+                user_data = cur.get("users", {}).get(user_key, {"count": 0, "completed": False})
+                user_data["count"] = user_data.get("count", 0) + 1
+                cur.setdefault("users", {})[user_key] = user_data
+                return cur
+            result = ref_hq.transaction(txn)
+            u = result["users"].get(str(message.author.id), {})
+            if u.get("count", 0) >= 1 and not u.get("completed"):
+                u["completed"] = True
+                ref_hq.child(f"users/{message.author.id}").set(u)
+                await message.channel.send(
+                    f"🎉 {message.author.mention}님, 히든 퀘스트 [아니시에이팅]을(를) 완료하셨습니다!"
+                )
 
-                if not first_time_str:
-                    ts_map[uid] = now.isoformat()
-                    cur["timestamps"] = ts_map
-                    cnts[uid] = 1                   #  첫 기록은 1로 시작
-                else:
-                    first_time = datetime.fromisoformat(first_time_str)
-                    if now - first_time > timedelta(hours=24):
-                        cur["timestamps"][uid] = now.isoformat()
-                        cnts[uid] = 1               #  하루 경과했으면 리셋 후 1
-                    else:
-                        cnts[uid] = cnts.get(uid, 0) + 1
+        # 메시지에 '감사합니다' 키워드가 포함된 경우에만 트랜잭션 실행
+        if "감사합니다" in message.content:
+            ref_hq = db.reference(f"{HIDDEN_QUEST_KEY}/2")
+            def txn2(cur):
+                cur = hidden_quest_txn(cur)
+                user_key = str(message.author.id)
+                user_data = cur.get("users", {}).get(user_key, {"count": 0, "completed": False})
+                user_data["count"] = user_data.get("count", 0) + 1
+                cur.setdefault("users", {})[user_key] = user_data
+                return cur
+            result2 = ref_hq.transaction(txn2)
+            u2 = result2["users"].get(str(message.author.id), {})
+            if u2.get("count", 0) >= 5 and not u2.get("completed"):
+                u2["completed"] = True
+                ref_hq.child(f"users/{message.author.id}").set(u2)
+                await message.channel.send(
+                    f"🎉 {message.author.mention}님, 히든 퀘스트 [감사한 마음] 달성!"
+                )
 
-                cur["counts"] = cnts
-                if cnts[uid] >= 50:
-                    cur["completed"] = True
-                    cur["winner"] = uid
-                    cur["completed_at"] = datetime.now(KST).strftime("%Y.%m.%d %H:%M")
-            return cur
-
-        result = ref_hq.transaction(txn)
-        if result.get("completed") and result.get("winner") == str(message.author.id):
-            await message.channel.send(
-                f"🎉 {message.author.mention}님, 히든 퀘스트 [아니시에이팅]을(를) 완료하셨습니다!"
-            )
-
-    # 메시지에 '감사합니다' 키워드가 포함된 경우에만 트랜잭션 실행
-    if "감사합니다" in message.content:
-        ref_hq = db.reference(f"{HIDDEN_QUEST_KEY}/2")
-        def txn2(cur):
-            cur = hidden_quest_txn(cur)
-            cnts = cur.get("counts", {})
-            if not cur["completed"] and "감사합니다" in message.content:
-                uid = str(message.author.id)
-                now = datetime.now(KST)
-                ts_map = cur.get("timestamps", {})
-                first_time_str = ts_map.get(uid)
-
-                if not first_time_str:
-                    ts_map[uid] = now.isoformat()
-                    cur["timestamps"] = ts_map
-                    cnts[uid] = 1                   # ✅ 첫 기록은 1로 시작
-                else:
-                    first_time = datetime.fromisoformat(first_time_str)
-                    if now - first_time > timedelta(hours=24):
-                        cur["timestamps"][uid] = now.isoformat()
-                        cnts[uid] = 1               # ✅ 하루 경과했으면 리셋 후 1
-                    else:
-                        cnts[uid] = cnts.get(uid, 0) + 1
-
-                cur["counts"] = cnts
-                if cnts[uid] >= 50:
-                    cur["completed"] = True
-                    cur["winner"] = uid
-                    cur["completed_at"] = datetime.now(KST).strftime("%Y. %-m. %-d %H:%M")
-            return cur
-
-        result = ref_hq.transaction(txn2)
-        if result.get("completed") and result.get("winner") == str(message.author.id):
-            await message.channel.send(
-                f"🎉 {message.author.mention}님, 히든 퀘스트 [감사한 마음] 달성!"
-            )
-
-    # 메시지에 '파푸' 키워드가 포함된 경우에만 트랜잭션 실행
-    if "파푸" in message.content:
-        ref_hq = db.reference(f"{HIDDEN_QUEST_KEY}/3")
-        def txn3(cur):
-            cur = hidden_quest_txn(cur)
-            cnts = cur.get("counts", {})
-            if not cur["completed"] and "파푸" in message.content:
-                uid = str(message.author.id)
-                now = datetime.now(KST)
-                ts_map = cur.get("timestamps", {})
-                first_time_str = ts_map.get(uid)
-
-                if not first_time_str:
-                    ts_map[uid] = now.isoformat()
-                    cur["timestamps"] = ts_map
-                    cnts[uid] = 1
-                else:
-                    first_time = datetime.fromisoformat(first_time_str)
-                    if now - first_time > timedelta(hours=24):
-                        ts_map[uid] = now.isoformat()
-                        cur["timestamps"] = ts_map
-                        cnts[uid] = 1
-                    else:
-                        cnts[uid] = cnts.get(uid, 0) + 1
-
-                cur["counts"] = cnts
-
-                if cnts[uid] >= 45:
-                    cur["completed"] = True
-                    cur["winner"] = uid
-                    cur["completed_at"] = datetime.now(KST).strftime("%Y. %-m. %-d %H:%M")
-            return cur
-
-        result = ref_hq.transaction(txn3)
-        if result.get("completed") and result.get("winner") == str(message.author.id):
-            await message.channel.send(
-                f"🎉 {message.author.mention}님, 히든 퀘스트 [파푸 애호가] 달성!"
-            )
-
-
-# ---- 슬래시 관리자 명령어 ----
+        # 메시지에 '파푸' 키워드가 포함된 경우에만 트랜잭션 실행
+        if "파푸" in message.content:
+            ref_hq = db.reference(f"{HIDDEN_QUEST_KEY}/3")
+            def txn3(cur):
+                cur = hidden_quest_txn(cur)
+                user_key = str(message.author.id)
+                user_data = cur.get("users", {}).get(user_key, {"count": 0, "completed": False})
+                user_data["count"] = user_data.get("count", 0) + 1
+                cur.setdefault("users", {})[user_key] = user_data
+                return cur
+            result3 = ref_hq.transaction(txn3)
+            u3 = result3["users"].get(str(message.author.id), {})
+            if u3.get("count", 0) >= 3 and not u3.get("completed"):
+                u3["completed"] = True
+                ref_hq.child(f"users/{message.author.id}").set(u3)
+                await message.channel.send(
+                    f"🎉 {message.author.mention}님, 히든 퀘스트 [파푸 애호가] 달성!"
+                )
+    except Exception as e:
+        logging.exception(f"[hidden_quest] transaction error: {e}")
 
 # ---- 히든 퀘스트 관리 커맨드 ----
 
