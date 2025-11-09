@@ -45,19 +45,15 @@ elif isinstance(v, dict):
 else:
     raise RuntimeError("FIREBASE_KEY_JSON는 JSON 객체여야 합니다.")
 
-# Firebase Admin 초기화
-cred = credentials.Certificate(firebase_key_dict)
-initialize_app(cred, {
-    "databaseURL": "https://npc-bot-add0a-default-rtdb.firebaseio.com"
-})
+# Firebase Admin 초기화 (중복 방지)
+# 이미 초기화되어 있으면 재사용, 없으면 한 번만 초기화
+FIREBASE_DB_URL = os.getenv("FIREBASE_DB_URL", "https://npc-bot-add0a-default-rtdb.firebaseio.com")
+try:
+    firebase_admin.get_app()  # 기본 앱 존재 여부 확인
+except ValueError:
+    cred = credentials.Certificate(firebase_key_dict)
+    firebase_admin.initialize_app(cred, {"databaseURL": FIREBASE_DB_URL})
 
-
-# Realtime Database URL 설정 및 초기화
-FIREBASE_DB_URL = "https://npc-bot-add0a-default-rtdb.firebaseio.com"
-cred = credentials.Certificate(firebase_key_dict)
-firebase_admin.initialize_app(cred, {
-    'databaseURL': FIREBASE_DB_URL
-})
 
 # ---- 설정 영역 ----
 EXEMPT_ROLE_IDS = [
