@@ -468,14 +468,6 @@ async def on_ready():
         except Exception as e:
             print(f"[on_ready] task start error: {e!r}")
             
-    # 5) 웹 헬스엔드포인트 시작(최초 1회)
-    if not getattr(bot, "_web_started", False):
-        try:
-            bot.loop.create_task(start_web_app())
-            bot._web_started = True
-        except Exception as e:
-            print(f"[on_ready] web start error: {e!r}")
-
 
 # ---- on_member_update: 환영 메시지 및 역할 동기화 ----
 @bot.event
@@ -1367,6 +1359,12 @@ logging.getLogger("discord.client").setLevel(logging.INFO)
 logging.getLogger("discord.gateway").setLevel(logging.INFO)
 logging.getLogger("discord.http").setLevel(logging.INFO)
 
-if __name__ == "__main__":
-    asyncio.run(_safe_start())
+# 프로그램 시작 시: 포트를 먼저 바인딩하고, 그 다음 디스코드 봇을 시작
+async def _main():
+    # 포트 바인딩(웹 서버) 먼저 시작 → Render의 포트 스캔 통과
+    await start_web_app()
+    # 이후 디스코드 로그인 루프 진입
+    await _safe_start()
 
+if __name__ == "__main__":
+    asyncio.run(_main())
