@@ -17,17 +17,40 @@ import logging, sys
 
 
 # ---- Firebase 초기화 ----
-# 환경 변수에서 Firebase 키(JSON) 로드
+from dotenv import load_dotenv
+import os, json
+from firebase_admin import credentials, initialize_app
+
 load_dotenv()
 firebase_key_json = os.getenv("FIREBASE_KEY_JSON")
+
 # === fail-fast: Firebase 키 없으면 즉시 종료 ===
 if not firebase_key_json:
     raise RuntimeError("FIREBASE_KEY_JSON 환경변수가 설정되어 있지 않습니다.")
+
+# 1차 파싱: 환경변수 값이 (a) 원본 JSON 이거나 (b) JSON 문자열(tojson 결과)일 수 있음
 try:
-    firebase_key_dict = json.loads(firebase_key_json)
-except json.decoder.JSONDecodeError:
-    import ast
-    firebase_key_dict = ast.literal_eval(firebase_key_json)
+    v = json.loads(firebase_key_json)
+except json.JSONDecodeError:
+    raise RuntimeError("FIREBASE_KEY_JSON 값이 올바른 JSON 형식이 아닙니다.")
+
+# 2차 처리: tojson로 넣은 경우(str)면 한 번 더 파싱해서 dict로 만든다
+if isinstance(v, str):
+    try:
+        firebase_key_dict = json.loads(v)  # 최종 dict
+    except json.JSONDecodeError:
+        raise RuntimeError("FIREBASE_KEY_JSON 내부 문자열이 올바른 JSON이 아닙니다.")
+elif isinstance(v, dict):
+    firebase_key_dict = v
+else:
+    raise RuntimeError("FIREBASE_KEY_JSON는 JSON 객체여야 합니다.")
+
+# Firebase Admin 초기화
+cred = credentials.Certificate(firebase_key_dict)
+initialize_app(cred, {
+    "databaseURL": "https://npc-bot-add0a-default-rtdb.firebaseio.com"
+})
+
 
 # Realtime Database URL 설정 및 초기화
 FIREBASE_DB_URL = "https://npc-bot-add0a-default-rtdb.firebaseio.com"
