@@ -1,20 +1,38 @@
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
+
 import os
+import sys
 import json
 import time
 import random
 import re
+import asyncio
+import logging
+from threading import Thread
+from datetime import time as dtime
+from datetime import datetime  # ← 추가
+KST = pytz.timezone("Asia/Seoul")  # ← 추가
+from collections import defaultdict
+from typing import Optional
+
 from dotenv import load_dotenv
 import firebase_admin
 from firebase_admin import credentials, db
 import pytz
-import asyncio
-from datetime import time as dtime
-from threading import Thread
-import logging, sys
 
+SAFEGUARD_DISABLE_EXTERNAL_IO = os.getenv("SAFEGUARD_DISABLE_EXTERNAL_IO", "1") == "1"
+SAFEGUARD_MIN_INTERVAL_GLOBAL = float(os.getenv("SAFEGUARD_MIN_INTERVAL_GLOBAL", "1.0"))  # 전역 처리 간 최소 간격(초)
+SAFEGUARD_MIN_INTERVAL_PER_CHANNEL = float(os.getenv("SAFEGUARD_MIN_INTERVAL_PER_CHANNEL", "2.0"))  # 채널별
+SAFEGUARD_MIN_INTERVAL_PER_USER = float(os.getenv("SAFEGUARD_MIN_INTERVAL_PER_USER", "2.0"))  # 유저별
+
+# 외부 HTTP 동시성 제한 (필요 시 사용)
+SAFEGUARD_EXTERNAL_IO_SEMAPHORE = asyncio.Semaphore(int(os.getenv("SAFEGUARD_EXTERNAL_IO_MAX_CONCURRENCY", "3")))
+
+_last_global_ts = 0.0
+_last_channel_ts = defaultdict(float)  # channel_id -> ts
+_last_user_ts = defaultdict(float)     # user_id -> ts
 
 load_dotenv()
 firebase_key_json = os.getenv("FIREBASE_KEY_JSON")
@@ -409,8 +427,54 @@ async def update_role_and_nick(member: discord.Member, new_level: int):
         except:
             pass
 # ────────────────────────────────────────────────────────────
+# === [SAFEGUARD UTILS] ===
+def _is_bot_message(message) -> bool:
+    # 봇/웹훅은 무시
+    if getattr(message.author, "bot", False):
+        return True
+    if getattr(message, "webhook_id", None):
+        return True
+    return False
 
- # ---- Discord Bot 초기화 (슬래시 전용) ---
+def _is_low_value_context(message) -> bool:
+    # DM, 스레드 등 필요 시 필터링
+    try:
+        if isinstance(message.channel, discord.DMChannel):
+            return True
+        # 스레드 필터링이 필요하면 아래 주석 해제
+        # if isinstance(message.channel, discord.Thread):
+        #     return True
+    except Exception:
+        pass
+    return False
+
+def _hit_cooldowns(message):
+    """쿨다운을 위반하면 이유 문자열을 반환, 아니면 None"""
+    global _last_global_ts
+    now = time.time()
+
+    # 전역 쿨다운
+    if now - _last_global_ts < SAFEGUARD_MIN_INTERVAL_GLOBAL:
+        return "global_cooldown"
+    _last_global_ts = now
+
+    # 채널 쿨다운
+    ch_id = getattr(message.channel, "id", None)
+    if ch_id is not None:
+        if now - _last_channel_ts[ch_id] < SAFEGUARD_MIN_INTERVAL_PER_CHANNEL:
+            return "channel_cooldown"
+        _last_channel_ts[ch_id] = now
+
+    # 유저 쿨다운
+    user_id = getattr(message.author, "id", None)
+    if user_id is not None:
+        if now - _last_user_ts[user_id] < SAFEGUARD_MIN_INTERVAL_PER_USER:
+            return "user_cooldown"
+        _last_user_ts[user_id] = now
+
+    return None
+
+# ---- Discord Bot 초기화 (슬래시 전용) ---
 intents = discord.Intents.all()
 
 bot = commands.Bot(
@@ -690,15 +754,39 @@ async def repeat_vc_mission_task():
 
 @bot.event
 async def on_message(message):
+    # === [SAFEGUARD IN on_message] ===
     try:
-        if message.author.bot:
+        if _is_bot_message(message):
             return
+        if _is_low_value_context(message):
+            return
+        cd_reason = _hit_cooldowns(message)
+        if cd_reason is not None:
+            # print(f"[on_message] skipped due to {cd_reason}")
+            return
+    except Exception as e:
+        print(f"[on_message] safeguard pre-check error: {e!r}")
+        return
+    # === [/SAFEGUARD IN on_message] ===
 
-        # 1) 특정 스레드 채팅 감지 시 역할 자동 부여
-        if message.channel.id == THREAD_ROLE_CHANNEL_ID:
+    try:
+        # ✅ 메시지 전처리: 내용 없으면 빠르게 종료 (이모지/파일만 등의 케이스)
+        text = (message.content or "").strip()
+        if not text:
+            return
+        text_lower = text.lower()
+
+        # 1) 특정 스레드 채팅 감지 시 역할 자동 부여 (권한/널 가드)
+        if getattr(message.channel, "id", None) == THREAD_ROLE_CHANNEL_ID and message.guild:
             role = message.guild.get_role(THREAD_ROLE_ID)
-            if role and role not in message.author.roles:
-                await message.author.add_roles(role)
+            member = getattr(message, "author", None)
+            if role and isinstance(member, discord.Member) and role not in member.roles:
+                try:
+                    await member.add_roles(role, reason="thread activity auto-assign")
+                except discord.Forbidden:
+                    logging.warning("[role] lacking permissions to add role")
+                except Exception as e:
+                    logging.exception(f"[role] add_roles error: {e}")
 
         # 2) 채팅 경험치 처리 로직
         uid = str(message.author.id)
@@ -750,7 +838,7 @@ async def on_message(message):
     try:
         # ---- 히든 퀘스트 진행 처리 ----
         # 메시지에 '아니' 키워드가 포함된 경우에만 트랜잭션 실행
-        if "아니" in message.content:
+        if "아니" in text:
             ref_hq = db.reference(f"{HIDDEN_QUEST_KEY}/1")
             def txn(cur):
                 cur = hidden_quest_txn(cur)
@@ -769,7 +857,7 @@ async def on_message(message):
                 )
 
         # 메시지에 '감사합니다' 키워드가 포함된 경우에만 트랜잭션 실행
-        if "감사합니다" in message.content:
+        if "감사합니다" in text:
             ref_hq = db.reference(f"{HIDDEN_QUEST_KEY}/2")
             def txn2(cur):
                 cur = hidden_quest_txn(cur)
@@ -788,7 +876,7 @@ async def on_message(message):
                 )
 
         # 메시지에 '파푸' 키워드가 포함된 경우에만 트랜잭션 실행
-        if "파푸" in message.content:
+        if "파푸" in text:
             ref_hq = db.reference(f"{HIDDEN_QUEST_KEY}/3")
             def txn3(cur):
                 cur = hidden_quest_txn(cur)
