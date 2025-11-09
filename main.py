@@ -14,7 +14,7 @@ import asyncio
 from datetime import time as dtime
 from threading import Thread
 import logging, sys
-import initialize_app
+
 
 load_dotenv()
 firebase_key_json = os.getenv("FIREBASE_KEY_JSON")
@@ -411,11 +411,7 @@ async def update_role_and_nick(member: discord.Member, new_level: int):
 # ────────────────────────────────────────────────────────────
 
  # ---- Discord Bot 초기화 (슬래시 전용) ---
-intents = discord.Intents.default()
-intents.message_content = True
-intents.guilds = True
-intents.members = True
-intents.voice_states = True
+intents = discord.Intents.all()
 
 bot = commands.Bot(
     command_prefix=commands.when_mentioned,     # 프리픽스 명령어 비활성화
@@ -431,20 +427,6 @@ async def on_ready():
     if not getattr(bot, "_commands_added", False):
         try:
             bot.tree.add_command(hidden_quest, override=True)
-                    # ⬇ 추가
-            for cmd in [
-                suggest,
-                analyze_info,
-                grant_xp,
-                deduct_xp,
-                hidden_quest_list,
-                info,
-                quest,
-                ranking,
-                attend,
-                attend_ranking
-            ]:
-                bot.tree.add_command(cmd)
             bot._commands_added = True
         except Exception as e:
             print(f"[on_ready] add_command failed: {e!r}")
@@ -853,8 +835,10 @@ async def 상태(inter: discord.Interaction, 번호: int):
     last_date = data.get("last_date", "-")
     completed = data.get("completed", False)
     winner = data.get("winner")
-    my_count = data.get("counts", {}).get(str(inter.user.id), 0)
+    u = (data.get("users") or {}).get(str(inter.user.id), {})
+    my_count = u.get("count", 0)
 
+    
     name = QUEST_NAMES.get(번호, f"퀘스트 {번호}")
     msg = f"""🔎 히든 퀘스트 [{name}] 상태
 📅 마지막 초기화: {last_date}
