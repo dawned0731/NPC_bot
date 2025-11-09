@@ -14,12 +14,7 @@ import asyncio
 from datetime import time as dtime
 from threading import Thread
 import logging, sys
-
-
-# ---- Firebase 초기화 ----
-from dotenv import load_dotenv
-import os, json
-from firebase_admin import credentials, initialize_app
+import initialize_app
 
 load_dotenv()
 firebase_key_json = os.getenv("FIREBASE_KEY_JSON")
@@ -436,6 +431,20 @@ async def on_ready():
     if not getattr(bot, "_commands_added", False):
         try:
             bot.tree.add_command(hidden_quest, override=True)
+                    # ⬇ 추가
+            for cmd in [
+                suggest,
+                analyze_info,
+                grant_xp,
+                deduct_xp,
+                hidden_quest_list,
+                info,
+                quest,
+                ranking,
+                attend,
+                attend_ranking
+            ]:
+                bot.tree.add_command(cmd)
             bot._commands_added = True
         except Exception as e:
             print(f"[on_ready] add_command failed: {e!r}")
