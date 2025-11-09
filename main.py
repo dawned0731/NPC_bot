@@ -10,17 +10,18 @@ import random
 import re
 import asyncio
 import logging
+import pytz
 from threading import Thread
 from datetime import time as dtime
 from datetime import datetime  # ← 추가
-KST = pytz.timezone("Asia/Seoul")  # ← 추가
 from collections import defaultdict
 from typing import Optional
 
 from dotenv import load_dotenv
 import firebase_admin
 from firebase_admin import credentials, db
-import pytz
+
+KST = pytz.timezone("Asia/Seoul")  # ← 추가
 
 SAFEGUARD_DISABLE_EXTERNAL_IO = os.getenv("SAFEGUARD_DISABLE_EXTERNAL_IO", "1") == "1"
 SAFEGUARD_MIN_INTERVAL_GLOBAL = float(os.getenv("SAFEGUARD_MIN_INTERVAL_GLOBAL", "1.0"))  # 전역 처리 간 최소 간격(초)
