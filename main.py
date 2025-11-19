@@ -130,18 +130,6 @@ REPEAT_VC_REQUIRED_MINUTES = 15
 REPEAT_VC_MIN_PEOPLE = 5
 SPECIAL_VC_CATEGORY_IDS = [1386685633820495991]
 ATTENDANCE_DB_KEY = "attendance_data"
-HIDDEN_QUEST_KEY = "hidden_quest_data"  # 히든 퀘스트 저장 키
-ALLOW_NO_PING = discord.AllowedMentions.none()
-quest_id = 1
-QUEST_NAMES = {1: "아니시에이팅", 2: "감사한 마음", 3: "파푸 애호가"}
-
-QUEST_CONDITIONS = {
-    1: "메시지에 '아니'를 24시간 동안 50회 이상 포함하면 달성됩니다.",
-    2: "메시지에 '감사합니다'를 24시간 동안 50회 이상 포함하면 달성됩니다.",
-    3: "메시지에 '파푸'를 24시간 동안 45회 이상 포함하면 달성됩니다."
-}  # 히든 퀘스트 이름 매핑
-
-VALID_QUEST_IDS = {1, 2, 3}  # 사용할 히든퀘스트 번호 목록
 
 # KST 타임존 객체
 KST = pytz.timezone("Asia/Seoul")
@@ -371,26 +359,6 @@ def get_month_key_kst(dt: datetime) -> str:
 # 최근 역할·닉네임 업데이트한 유저를 추적해 rate-limit 방지
 recent_role_updates: set[int] = set()
 
-def hidden_quest_txn(cur):
-    # 처음 호출 시 기본 구조 생성
-    if cur is None:
-        cur = {
-            "last_date": datetime.now(KST).strftime("%Y-%m-%d"),
-            "counts": {},
-            "timestamps": {},
-            "completed": False,
-            "winner": None
-        }
-
-    today = datetime.now(KST).strftime("%Y-%m-%d")
-    if cur["last_date"] != today:
-        cur["last_date"] = today
-        cur["counts"] = {}
-        cur["timestamps"] = {}
-
-    return cur
-
-
 # ─── 데바운스 적용 헬퍼 함수 추가 ────────────────────────────
 
 async def update_role_and_nick(member: discord.Member, new_level: int):
@@ -488,13 +456,6 @@ bot = commands.Bot(
 # ---- on_ready ----
 @bot.event
 async def on_ready():
-    # 1) 커맨드 등록: 최초 1회만
-    if not getattr(bot, "_commands_added", False):
-        try:
-            bot.tree.add_command(hidden_quest, override=True)
-            bot._commands_added = True
-        except Exception as e:
-            print(f"[on_ready] add_command failed: {e!r}")
 
     # 2) 시즌 보이스 채널 업데이트 (예외 로깅)
     try:
@@ -836,136 +797,6 @@ async def on_message(message):
     except Exception as e:
         print(f"❌ on_message 처리 중 오류: {e}")
 
-    try:
-        # ---- 히든 퀘스트 진행 처리 ----
-        # 메시지에 '아니' 키워드가 포함된 경우에만 트랜잭션 실행
-        if "아니" in text:
-            ref_hq = db.reference(f"{HIDDEN_QUEST_KEY}/1")
-            def txn(cur):
-                cur = hidden_quest_txn(cur)
-                user_key = str(message.author.id)
-                user_data = cur.get("users", {}).get(user_key, {"count": 0, "completed": False})
-                user_data["count"] = user_data.get("count", 0) + 1
-                cur.setdefault("users", {})[user_key] = user_data
-                return cur
-            result = ref_hq.transaction(txn)
-            u = result["users"].get(str(message.author.id), {})
-            if u.get("count", 0) >= 1 and not u.get("completed"):
-                u["completed"] = True
-                ref_hq.child(f"users/{message.author.id}").set(u)
-                await message.channel.send(
-                    f"🎉 {message.author.mention}님, 히든 퀘스트 [아니시에이팅]을(를) 완료하셨습니다!"
-                )
-
-        # 메시지에 '감사합니다' 키워드가 포함된 경우에만 트랜잭션 실행
-        if "감사합니다" in text:
-            ref_hq = db.reference(f"{HIDDEN_QUEST_KEY}/2")
-            def txn2(cur):
-                cur = hidden_quest_txn(cur)
-                user_key = str(message.author.id)
-                user_data = cur.get("users", {}).get(user_key, {"count": 0, "completed": False})
-                user_data["count"] = user_data.get("count", 0) + 1
-                cur.setdefault("users", {})[user_key] = user_data
-                return cur
-            result2 = ref_hq.transaction(txn2)
-            u2 = result2["users"].get(str(message.author.id), {})
-            if u2.get("count", 0) >= 5 and not u2.get("completed"):
-                u2["completed"] = True
-                ref_hq.child(f"users/{message.author.id}").set(u2)
-                await message.channel.send(
-                    f"🎉 {message.author.mention}님, 히든 퀘스트 [감사한 마음] 달성!"
-                )
-
-        # 메시지에 '파푸' 키워드가 포함된 경우에만 트랜잭션 실행
-        if "파푸" in text:
-            ref_hq = db.reference(f"{HIDDEN_QUEST_KEY}/3")
-            def txn3(cur):
-                cur = hidden_quest_txn(cur)
-                user_key = str(message.author.id)
-                user_data = cur.get("users", {}).get(user_key, {"count": 0, "completed": False})
-                user_data["count"] = user_data.get("count", 0) + 1
-                cur.setdefault("users", {})[user_key] = user_data
-                return cur
-            result3 = ref_hq.transaction(txn3)
-            u3 = result3["users"].get(str(message.author.id), {})
-            if u3.get("count", 0) >= 3 and not u3.get("completed"):
-                u3["completed"] = True
-                ref_hq.child(f"users/{message.author.id}").set(u3)
-                await message.channel.send(
-                    f"🎉 {message.author.mention}님, 히든 퀘스트 [파푸 애호가] 달성!"
-                )
-    except Exception as e:
-        logging.exception(f"[hidden_quest] transaction error: {e}")
-
-# ---- 히든 퀘스트 관리 커맨드 ----
-
-hidden_quest = app_commands.Group(
-    name="히든관리",
-    description="히든 퀘스트 관리"
-)
-
-@hidden_quest.command(
-    name="상태",
-    description="지정한 히든퀘스트 상태 조회"
-)
-@app_commands.describe(
-    번호="조회할 히든퀘스트 번호 (정수)"
-)
-@app_commands.default_permissions(administrator=True)
-async def 상태(inter: discord.Interaction, 번호: int):
-    if 번호 not in VALID_QUEST_IDS:
-        return await inter.response.send_message(
-            f"❌ 유효하지 않은 퀘스트 번호입니다. 사용 가능한 번호: {sorted(VALID_QUEST_IDS)}",
-            ephemeral=True
-        )
-
-    key = f"{HIDDEN_QUEST_KEY}/{번호}"
-    data = db.reference(key).get() or {}
-    last_date = data.get("last_date", "-")
-    completed = data.get("completed", False)
-    winner = data.get("winner")
-    u = (data.get("users") or {}).get(str(inter.user.id), {})
-    my_count = u.get("count", 0)
-
-    
-    name = QUEST_NAMES.get(번호, f"퀘스트 {번호}")
-    msg = f"""🔎 히든 퀘스트 [{name}] 상태
-📅 마지막 초기화: {last_date}
-✅ 완료 여부: {'완료' if completed else '미완료'}
-🏆 달성자: {f'<@{winner}>' if winner else '없음'}
-📊 내 카운트: {my_count} / 50"""
-    await inter.response.send_message(msg, ephemeral=True)
-
-@hidden_quest.command(
-    name="리셋",
-    description="지정한 히든퀘스트 번호만 초기화합니다."
-)
-@app_commands.describe(
-    번호="초기화할 히든퀘스트 번호 (정수)"
-)
-@app_commands.default_permissions(administrator=True)
-async def 리셋(inter: discord.Interaction, 번호: int):
-    if 번호 not in VALID_QUEST_IDS:
-        return await inter.response.send_message(
-            f"❌ 유효하지 않은 퀘스트 번호입니다. 사용 가능한 번호: {sorted(VALID_QUEST_IDS)}",
-            ephemeral=True
-        )
-
-    key = f"{HIDDEN_QUEST_KEY}/{번호}"
-    today = datetime.now(KST).strftime("%Y-%m-%d")
-    db.reference(key).set({
-        "last_date": today,
-        "counts": {},
-        "completed": False,
-        "winner": None
-    })
-    await inter.response.send_message(
-        f"🔄 히든 퀘스트 #{번호}를 초기화했습니다.",
-        ephemeral=True
-    )
-
-    
-
 # ---- 기타 슬래시 커맨드 핸들러 (/정보, /퀘스트, /랭킹, /출석, /출석랭킹) ----
 
 # 건의함 기능 설정
@@ -1125,27 +956,6 @@ async def deduct_xp(
 
     await interaction.response.send_message(f"✅ {member.mention}에게서 경험치 {amount}XP 차감 완료!", ephemeral=True)
 # ---- 기타 슬래시 커맨드 핸들러 (/정보, /퀘스트, /랭킹, /출석, /출석랭킹) ----
-
-  # 히든 퀘스트 목록 조회 명령어 (일반 사용자용)
-@bot.tree.command(name="히든퀘스트", description="히든 퀘스트 목록을 확인합니다.")
-async def hidden_quest_list(interaction: discord.Interaction):
-    raw = db.reference(HIDDEN_QUEST_KEY).get()
-    data = raw if isinstance(raw, dict) else {}
-    lines = ["🕵️ 히든 퀘스트"]
-
-    for qid in sorted(VALID_QUEST_IDS):
-        q = data.get(str(qid), {})
-        if q.get("completed"):
-            name = QUEST_NAMES.get(qid, f"퀘스트 {qid}")
-            winner = f"<@{q.get('winner')}>" if q.get("winner") else "알 수 없음"
-            completed_at = q.get("completed_at", "알 수 없음")
-            condition = QUEST_CONDITIONS.get(qid, "조건 비공개")
-            lines.append(f"{qid}. {name}\n달성자: {winner}\n완료 시각: {completed_at}\n📘 조건: {condition}")
-        else:
-            lines.append(f"{qid}. ???")
-
-    await interaction.response.send_message("\n\n".join(lines))
-
                                             
 @bot.tree.command(name="정보", description="자신의 레벨 및 경험치 정보를 확인합니다.")
 async def info(interaction: discord.Interaction):
