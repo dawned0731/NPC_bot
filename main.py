@@ -446,6 +446,15 @@ def _hit_cooldowns(message):
 # ---- Discord Bot 초기화 (슬래시 전용) ---
 intents = discord.Intents.all()
 
+# --- AllowedMentions 공통 설정 (핑 방지용) ---
+ALLOW_NO_PING = discord.AllowedMentions(
+    everyone=False,     # @everyone 금지
+    users=False,        # 유저 멘션 금지
+    roles=False,        # 역할 멘션 금지
+    replied_user=False  # 답장 대상 멘션 금지
+)
+# --- /END AllowedMentions 설정 ---
+
 bot = commands.Bot(
     command_prefix=commands.when_mentioned,     # 프리픽스 명령어 비활성화
     help_command=None,      # 기본 도움말 명령어 비활성화
