@@ -468,7 +468,7 @@ async def on_ready():
 
     # 2) 시즌 보이스 채널 업데이트 (예외 로깅)
     try:
-        await update_season_voice_channels()
+        await update_season_voice_channels(bot)
     except Exception as e:
         print(f"[on_ready] update_season_voice_channels error: {e!r}")
 
@@ -503,7 +503,7 @@ async def on_member_update(before, after):
     added = after_roles - before_roles
     
     if before_roles != after_roles:
-        await update_season_voice_channels()
+        await update_season_voice_channels(bot)
 
     # 특정 스레드 역할이 부여되면 환영 메시지
     if THREAD_ROLE_ID in added:
