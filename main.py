@@ -91,7 +91,7 @@ SEASON_ROLE_CHANNEL_MAP = {
 }
 
 async def update_season_voice_channels(_bot: commands.Bot):
-    for guild in bot.guilds:
+    for guild in _bot.guilds:
         for season, (role_id, channel_id) in SEASON_ROLE_CHANNEL_MAP.items():
             role = guild.get_role(role_id)
             channel = guild.get_channel(channel_id)
@@ -716,6 +716,8 @@ async def repeat_vc_mission_task():
 
                 mission_data[uid] = user_m
 
+    await asave_mission_data(mission_data)
+    
     # 로컬 JSON에도 백업
     try:
         save_json(MISSION_PATH, mission_data)
@@ -907,7 +909,7 @@ async def analyze_info(interaction: discord.Interaction, member: discord.Member)
         last_dt = datetime.fromtimestamp(last_ts, KST)
         elapsed = datetime.now(KST) - last_dt
         days_ago = elapsed.days
-        last_seen = last_dt.strftime("%Y. %-m. %-d %H:%M")
+        last_seen = last_dt.strftime("%Y. %m. %d %H:%M")
     else:
         last_seen = "기록 없음"
         days_ago = "-"
