@@ -3,3 +3,4 @@ python-dotenv>=1.0.1
 firebase-admin>=6.4.0
 flask
 pytz
+pillow
