@@ -90,7 +90,7 @@ SEASON_ROLE_CHANNEL_MAP = {
     "겨울": (1386685631551246423, 1401854945547915316),
 }
 
-async def update_season_voice_channels():
+async def update_season_voice_channels(_bot: commands.Bot):
     for guild in bot.guilds:
         for season, (role_id, channel_id) in SEASON_ROLE_CHANNEL_MAP.items():
             role = guild.get_role(role_id)
@@ -1178,14 +1178,25 @@ from aiohttp import web
 async def health(_request):
     return web.Response(text="Bot is running!")
 
+_web_runner = None
+
 async def start_web_app():
-    app = web.Application()
-    app.router.add_get("/", health)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    port = int(os.getenv("PORT", "10000"))
-    site = web.TCPSite(runner, host="0.0.0.0", port=port)
-    await site.start()
+    global _web_runner
+    try:
+        app = web.Application()
+        app.router.add_get("/", health)
+
+        _web_runner = web.AppRunner(app)
+        await _web_runner.setup()
+
+        port = int(os.getenv("PORT", "10000"))
+        site = web.TCPSite(_web_runner, host="0.0.0.0", port=port)
+        await site.start()
+
+        logging.info(f"[web] listening on 0.0.0.0:{port}")
+    except Exception as e:
+        logging.exception(f"[web] failed to start: {e}")
+        # 웹이 죽어도 봇은 계속 켠다
 
 async def _safe_start():
     """
@@ -1202,9 +1213,14 @@ async def _safe_start():
             print("[login] bot.start 진입")
             # ❌ timeout 제거: 실행 중에는 세션을 끊지 않는다
             await bot.start(TOKEN)
-            print("[login] bot.start 정상 종료")
-            break  # 정상 종료 시 루프 탈출
-
+            print("[login] bot.start returned unexpectedly. restarting soon.")
+            try:
+                await bot.close()
+            except Exception:
+                pass
+            await asyncio.sleep(10)
+            continue
+            
         except discord.HTTPException as e:
             # 로그인/연결 직전 단계의 HTTP 오류만 백오프
             status = getattr(e, "status", None)
