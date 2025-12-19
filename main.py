@@ -142,12 +142,12 @@ def render_rank_card(
     AVATAR_X, AVATAR_Y = 36, 72
 
     TEXT_X = 155
-    NAME_Y = 75
-    STAT_Y = 117
-    XP_Y = 147
+    NAME_Y = 60
+    STAT_Y = 102
+    XP_Y = 130
 
     BAR_X, BAR_Y = 150, 180
-    BAR_W, BAR_H = 320, 22
+    BAR_W, BAR_H = 300, 22
     BAR_RADIUS = 11  # BAR_H//2
 
     # ===== 아바타 =====
