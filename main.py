@@ -1157,7 +1157,15 @@ async def deduct_xp(
                                             
 @bot.tree.command(name="정보", description="내 정보를 이미지 카드로 확인합니다")
 async def info(interaction: discord.Interaction):
-    await interaction.response.defer()
+    # defer부터 안전하게
+    try:
+        await interaction.response.defer()
+    except discord.NotFound:
+        # 10062 Unknown interaction: 이미 만료됨
+        return
+    except Exception:
+        # defer 실패는 일단 종료
+        return
 
     try:
         logging.info("[/정보] start")
@@ -1165,8 +1173,10 @@ async def info(interaction: discord.Interaction):
         user = interaction.user
         uid = str(user.id)
 
-        logging.info("[/정보] load exp")
-        exp_data = await aload_exp_data(uid)
+        logging.info("[/정보] load exp (all)")
+        all_exp = await aload_exp_data()          # ✅ 인자 없이
+        exp_data = all_exp.get(uid) if all_exp else None
+
         if not exp_data:
             await interaction.followup.send("데이터가 없습니다.")
             return
@@ -1176,7 +1186,7 @@ async def info(interaction: discord.Interaction):
 
         if exp_data.get("level") != level:
             exp_data["level"] = level
-            await asave_user_exp(uid, exp_data)
+            await asave_user_exp(uid, exp_data)  # 이 함수는 유저 단위 저장이 맞는지 기존 코드와 동일해야 함
 
         prev_thr = THRESHOLDS[level - 1] if (level - 1) < len(THRESHOLDS) else THRESHOLDS[-1]
         next_thr = THRESHOLDS[level] if level < len(THRESHOLDS) else THRESHOLDS[-1]
@@ -1219,10 +1229,17 @@ async def info(interaction: discord.Interaction):
 
     except asyncio.TimeoutError:
         logging.exception("[/정보] timeout")
-        await interaction.followup.send("응답이 지연되어 중단했습니다. (타임아웃)")
+        try:
+            await interaction.followup.send("응답이 지연되어 중단했습니다. (타임아웃)")
+        except Exception:
+            pass
     except Exception as e:
         logging.exception("[/정보] error")
-        await interaction.followup.send(f"처리 중 오류가 발생했습니다: {type(e).__name__}")
+        try:
+            await interaction.followup.send(f"처리 중 오류: {type(e).__name__}")
+        except Exception:
+            pass
+
 
 @bot.tree.command(name="퀘스트", description="일일 및 반복 VC 퀘스트 현황을 확인합니다.")
 async def quest(interaction: discord.Interaction):
