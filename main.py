@@ -141,13 +141,13 @@ def render_rank_card(
     AVATAR_SIZE = 96
     AVATAR_X, AVATAR_Y = 36, 72
 
-    TEXT_X = 150
-    NAME_Y = 70
-    STAT_Y = 112
-    XP_Y = 142
+    TEXT_X = 155
+    NAME_Y = 75
+    STAT_Y = 117
+    XP_Y = 147
 
     BAR_X, BAR_Y = 150, 180
-    BAR_W, BAR_H = 410, 22
+    BAR_W, BAR_H = 320, 22
     BAR_RADIUS = 11  # BAR_H//2
 
     # ===== 아바타 =====
@@ -171,11 +171,11 @@ def render_rank_card(
     # ===== 닉네임 =====
     name_max_w = 600 - TEXT_X - 30
     safe_name = _ellipsize(draw, display_name, font_name, name_max_w)
-    draw.text((TEXT_X, NAME_Y), safe_name, font=font_name, fill=(20, 20, 20, 255))
+    draw.text((TEXT_X, NAME_Y), safe_name, font=font_name, fill=(0x05, 0x44, 0x6B, 255))
 
     # ===== 레벨 / XP =====
-    draw.text((TEXT_X, STAT_Y), f"Lv. {int(level)}", font=font_stat, fill=(20, 20, 20, 255))
-    draw.text((TEXT_X, XP_Y), f"XP  {_format_int(total_xp)}", font=font_stat, fill=(20, 20, 20, 255))
+    draw.text((TEXT_X, STAT_Y), f"Lv. {int(level)}", font=font_stat, fill=(0xFF, 0xFF, 0xFF, 255))
+    draw.text((TEXT_X, XP_Y), f"XP  {_format_int(total_xp)}", font=font_stat, fill=(0x9E, 0x9E, 0x9E, 255))
 
     # ===== 진행도 바 =====
     pct = _clamp01(float(pct))
@@ -183,7 +183,7 @@ def render_rank_card(
     draw.rounded_rectangle(
         (BAR_X, BAR_Y, BAR_X + BAR_W, BAR_Y + BAR_H),
         radius=BAR_RADIUS,
-        fill=(210, 210, 210, 255),
+        fill=(0xED, 0xF8, 0xFC, 255),
     )
     # 바 채움
     fill_w = int(BAR_W * pct)
@@ -191,7 +191,7 @@ def render_rank_card(
         draw.rounded_rectangle(
             (BAR_X, BAR_Y, BAR_X + fill_w, BAR_Y + BAR_H),
             radius=BAR_RADIUS,
-            fill=(60, 60, 60, 255),
+            fill=(0x05, 0x44, 0x6B, 255),
         )
 
     # 진행도 텍스트
