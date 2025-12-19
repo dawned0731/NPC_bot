@@ -21,6 +21,187 @@ from dotenv import load_dotenv
 import firebase_admin
 from firebase_admin import credentials, db
 
+from io import BytesIO
+from PIL import Image, ImageDraw, ImageFont
+
+
+# =========================
+# Rank card rendering (Pillow)
+# =========================
+
+_ASSET_DIR = os.path.join(os.path.dirname(__file__), "assets")
+_BG_PATH = os.path.join(_ASSET_DIR, "rank_bg.png")
+_FONT_PATH = os.path.join(_ASSET_DIR, "fonts", "Donoun Medium.ttf")  # 네가 넣은 폰트명에 맞춤
+
+_BG_TEMPLATE = None  # type: Optional[Image.Image]
+_FONT_CACHE = {}     # size -> ImageFont.FreeTypeFont
+
+
+def _get_bg_template() -> Image.Image:
+    global _BG_TEMPLATE
+    if _BG_TEMPLATE is None:
+        bg = Image.open(_BG_PATH).convert("RGBA")
+        _BG_TEMPLATE = bg
+    return _BG_TEMPLATE
+
+
+def _get_font(size: int) -> ImageFont.FreeTypeFont:
+    font = _FONT_CACHE.get(size)
+    if font is None:
+        font = ImageFont.truetype(_FONT_PATH, size)
+        _FONT_CACHE[size] = font
+    return font
+
+
+def _format_int(n: int) -> str:
+    try:
+        return f"{int(n):,}"
+    except Exception:
+        return str(n)
+
+
+def _clamp01(x: float) -> float:
+    if x < 0.0:
+        return 0.0
+    if x > 1.0:
+        return 1.0
+    return x
+
+
+def _ellipsize(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont, max_width: int) -> str:
+    if not text:
+        return ""
+    if draw.textlength(text, font=font) <= max_width:
+        return text
+
+    ell = "…"
+    lo, hi = 0, len(text)
+    # 이진 탐색으로 최대 길이 찾기
+    while lo < hi:
+        mid = (lo + hi) // 2
+        cand = text[:mid] + ell
+        if draw.textlength(cand, font=font) <= max_width:
+            lo = mid + 1
+        else:
+            hi = mid
+    cut = max(0, lo - 1)
+    return text[:cut] + ell
+
+
+def _circle_crop(im: Image.Image, size: int) -> Image.Image:
+    # 정사각으로 맞춘 뒤 원형 마스크
+    im = im.convert("RGBA")
+    w, h = im.size
+    s = min(w, h)
+    left = (w - s) // 2
+    top = (h - s) // 2
+    im = im.crop((left, top, left + s, top + s))
+
+    resample = getattr(Image, "Resampling", None)
+    if resample is not None:
+        im = im.resize((size, size), resample=resample.LANCZOS)
+    else:
+        im = im.resize((size, size), resample=Image.LANCZOS)
+
+    mask = Image.new("L", (size, size), 0)
+    md = ImageDraw.Draw(mask)
+    md.ellipse((0, 0, size - 1, size - 1), fill=255)
+
+    out = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    out.paste(im, (0, 0), mask)
+    return out
+
+
+def render_rank_card(
+    *,
+    display_name: str,
+    level: int,
+    total_xp: int,
+    cur_xp: int,
+    need_xp: int,
+    pct: float,
+    avatar_bytes: Optional[bytes] = None,
+) -> BytesIO:
+    """
+    디스코드/DB와 무관한 순수 렌더러.
+    - 입력: 가공된 수치 + 아바타 이미지 bytes
+    - 출력: PNG(BytesIO)
+    """
+    bg = _get_bg_template()
+    img = bg.copy()
+    draw = ImageDraw.Draw(img)
+
+    # ===== 레이아웃 (600x240 기준) =====
+    AVATAR_SIZE = 96
+    AVATAR_X, AVATAR_Y = 36, 72
+
+    TEXT_X = 150
+    NAME_Y = 70
+    STAT_Y = 112
+    XP_Y = 142
+
+    BAR_X, BAR_Y = 150, 180
+    BAR_W, BAR_H = 410, 22
+    BAR_RADIUS = 11  # BAR_H//2
+
+    # ===== 아바타 =====
+    if avatar_bytes:
+        try:
+            av = Image.open(BytesIO(avatar_bytes))
+            av = _circle_crop(av, AVATAR_SIZE)
+            img.paste(av, (AVATAR_X, AVATAR_Y), av)
+        except Exception:
+            # 아바타 실패 시 회색 원으로 대체
+            fallback = Image.new("RGBA", (AVATAR_SIZE, AVATAR_SIZE), (0, 0, 0, 0))
+            fd = ImageDraw.Draw(fallback)
+            fd.ellipse((0, 0, AVATAR_SIZE - 1, AVATAR_SIZE - 1), fill=(120, 120, 120, 255))
+            img.paste(fallback, (AVATAR_X, AVATAR_Y), fallback)
+
+    # ===== 폰트 =====
+    font_name = _get_font(28)
+    font_stat = _get_font(22)
+    font_small = _get_font(18)
+
+    # ===== 닉네임 =====
+    name_max_w = 600 - TEXT_X - 30
+    safe_name = _ellipsize(draw, display_name, font_name, name_max_w)
+    draw.text((TEXT_X, NAME_Y), safe_name, font=font_name, fill=(20, 20, 20, 255))
+
+    # ===== 레벨 / XP =====
+    draw.text((TEXT_X, STAT_Y), f"Lv. {int(level)}", font=font_stat, fill=(20, 20, 20, 255))
+    draw.text((TEXT_X, XP_Y), f"XP  {_format_int(total_xp)}", font=font_stat, fill=(20, 20, 20, 255))
+
+    # ===== 진행도 바 =====
+    pct = _clamp01(float(pct))
+    # 바 배경
+    draw.rounded_rectangle(
+        (BAR_X, BAR_Y, BAR_X + BAR_W, BAR_Y + BAR_H),
+        radius=BAR_RADIUS,
+        fill=(210, 210, 210, 255),
+    )
+    # 바 채움
+    fill_w = int(BAR_W * pct)
+    if fill_w > 0:
+        draw.rounded_rectangle(
+            (BAR_X, BAR_Y, BAR_X + fill_w, BAR_Y + BAR_H),
+            radius=BAR_RADIUS,
+            fill=(60, 60, 60, 255),
+        )
+
+    # 진행도 텍스트
+    # 예: "123 / 456 (27%)"
+    pct_int = int(round(pct * 100))
+    prog_text = f"{_format_int(cur_xp)} / {_format_int(need_xp)} ({pct_int}%)"
+    draw.text((BAR_X, BAR_Y - 22), prog_text, font=font_small, fill=(60, 60, 60, 255))
+
+    # ===== PNG 출력 =====
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    return buf
+
+# =======================================================================
+
 KST = pytz.timezone("Asia/Seoul")  # ← 추가
 
 SAFEGUARD_DISABLE_EXTERNAL_IO = os.getenv("SAFEGUARD_DISABLE_EXTERNAL_IO", "1") == "1"
