@@ -11,6 +11,8 @@ import re
 import asyncio
 import logging
 import pytz
+import aiohttp
+
 from threading import Thread
 from datetime import time as dtime
 from datetime import datetime  # ← 추가
@@ -23,6 +25,7 @@ from firebase_admin import credentials, db
 
 from io import BytesIO
 from PIL import Image, ImageDraw, ImageFont
+
 
 
 # =========================
@@ -1149,29 +1152,65 @@ async def deduct_xp(
     await interaction.response.send_message(f"✅ {member.mention}에게서 경험치 {amount}XP 차감 완료!", ephemeral=True)
 # ---- 기타 슬래시 커맨드 핸들러 (/정보, /퀘스트, /랭킹, /출석, /출석랭킹) ----
                                             
-@bot.tree.command(name="정보", description="자신의 레벨 및 경험치 정보를 확인합니다.")
+@bot.tree.command(name="정보", description="내 정보를 확인합니다")
 async def info(interaction: discord.Interaction):
-    uid = str(interaction.user.id)
-    user = await aget_user_exp(uid)
-    current_exp = user["exp"]
-    lvl = calculate_level(current_exp)
-    if lvl != user["level"]:
-        user["level"] = lvl
-        await asave_user_exp(uid, user)
-    # 새 등비 5단계 곡선 기준 진행도 계산
-    left = THRESHOLDS[lvl - 1]
-    right = THRESHOLDS[lvl] if lvl <= LEVEL_MAX else THRESHOLDS[-1]
-    progress = max(0, current_exp - left)
-    total = max(1, right - left)
-    percent = (progress / total) * 100
-    filled = int(percent / 5)
-    bar = "🟦" * filled + "⬜" * (20 - filled)
+    await interaction.response.defer()
 
-    embed = discord.Embed(title=f"📊 {interaction.user.display_name}님의 정보", color=discord.Color.blue())
-    embed.add_field(name="레벨", value=f"Lv. {lvl} (누적: {current_exp:,} XP)", inline=False)
-    embed.add_field(name="경험치", value=f"{progress:,} / {total:,} XP", inline=False)
-    embed.add_field(name="진행도", value=f"{bar} ← {percent:.1f}%", inline=False)
-    await interaction.response.send_message(embed=embed)
+    user = interaction.user
+    uid = str(user.id)
+
+    # ===== EXP 데이터 로드 =====
+    exp_data = await aload_exp_data(uid)
+    if not exp_data:
+        await interaction.followup.send("데이터가 없습니다.")
+        return
+
+    total_xp = int(exp_data.get("exp", 0))
+    level = calculate_level(total_xp)
+
+    # 레벨 보정 (기존 로직 유지)
+    if exp_data.get("level") != level:
+        exp_data["level"] = level
+        await asave_user_exp(uid, exp_data)
+
+    # ===== 현재 레벨 진행도 계산 =====
+    prev_thr = THRESHOLDS[level - 1] if level - 1 < len(THRESHOLDS) else THRESHOLDS[-1]
+    next_thr = THRESHOLDS[level] if level < len(THRESHOLDS) else THRESHOLDS[-1]
+
+    cur_xp = max(0, total_xp - prev_thr)
+    need_xp = max(1, next_thr - prev_thr)
+    pct = cur_xp / need_xp
+
+    # ===== 아바타 다운로드 =====
+    avatar_bytes = None
+    try:
+        avatar_url = user.display_avatar.replace(size=256).url
+        async with aiohttp.ClientSession() as session:
+            async with session.get(avatar_url) as resp:
+                if resp.status == 200:
+                    avatar_bytes = await resp.read()
+    except Exception:
+        avatar_bytes = None
+
+    # ===== 이미지 렌더링 (CPU 작업 → to_thread) =====
+    try:
+        buf = await asyncio.to_thread(
+            render_rank_card,
+            display_name=user.display_name,
+            level=level,
+            total_xp=total_xp,
+            cur_xp=cur_xp,
+            need_xp=need_xp,
+            pct=pct,
+            avatar_bytes=avatar_bytes,
+        )
+    except Exception as e:
+        await interaction.followup.send("이미지 생성 중 오류가 발생했습니다.")
+        raise e
+
+    # ===== 전송 =====
+    file = discord.File(fp=buf, filename="rank.png")
+    await interaction.followup.send(file=file)
 
 @bot.tree.command(name="퀘스트", description="일일 및 반복 VC 퀘스트 현황을 확인합니다.")
 async def quest(interaction: discord.Interaction):
