@@ -2,6 +2,7 @@ import discord
 from discord.ext import commands, tasks
 from discord import app_commands
 
+
 import os
 import sys
 import json
@@ -26,6 +27,8 @@ from firebase_admin import credentials, db
 from io import BytesIO
 from PIL import Image, ImageDraw, ImageFont
 
+import logging
+logging.basicConfig(level=logging.INFO)
 
 
 # =========================
@@ -1157,10 +1160,12 @@ async def info(interaction: discord.Interaction):
     await interaction.response.defer()
 
     try:
+        logging.info("[/정보] start")
+
         user = interaction.user
         uid = str(user.id)
 
-        # ===== EXP 데이터 로드 =====
+        logging.info("[/정보] load exp")
         exp_data = await aload_exp_data(uid)
         if not exp_data:
             await interaction.followup.send("데이터가 없습니다.")
@@ -1169,32 +1174,31 @@ async def info(interaction: discord.Interaction):
         total_xp = int(exp_data.get("exp", 0))
         level = calculate_level(total_xp)
 
-        # 레벨 보정
         if exp_data.get("level") != level:
             exp_data["level"] = level
             await asave_user_exp(uid, exp_data)
 
-        # ===== 진행도 계산 =====
         prev_thr = THRESHOLDS[level - 1] if (level - 1) < len(THRESHOLDS) else THRESHOLDS[-1]
         next_thr = THRESHOLDS[level] if level < len(THRESHOLDS) else THRESHOLDS[-1]
-
         cur_xp = max(0, total_xp - prev_thr)
         need_xp = max(1, next_thr - prev_thr)
         pct = cur_xp / need_xp
 
-        # ===== 아바타 다운로드 (반드시 timeout 걸기) =====
+        logging.info("[/정보] fetch avatar")
         avatar_bytes = None
         try:
             avatar_url = user.display_avatar.replace(size=256).url
-            timeout = aiohttp.ClientTimeout(total=5)  # 핵심
+            timeout = aiohttp.ClientTimeout(total=5)
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.get(avatar_url, headers={"User-Agent": "Mozilla/5.0"}) as resp:
+                    logging.info(f"[/정보] avatar resp={resp.status}")
                     if resp.status == 200:
                         avatar_bytes = await resp.read()
         except Exception:
-            avatar_bytes = None  # 실패하면 그냥 아바타 없이 진행
+            logging.exception("[/정보] avatar fetch failed")
+            avatar_bytes = None
 
-        # ===== 이미지 렌더링 (timeout + to_thread) =====
+        logging.info("[/정보] render image")
         buf = await asyncio.wait_for(
             asyncio.to_thread(
                 render_rank_card,
@@ -1206,16 +1210,19 @@ async def info(interaction: discord.Interaction):
                 pct=pct,
                 avatar_bytes=avatar_bytes,
             ),
-            timeout=8,  # 렌더링이 비정상적으로 멈출 경우 대비
+            timeout=8,
         )
 
+        logging.info("[/정보] send file")
         await interaction.followup.send(file=discord.File(fp=buf, filename="rank.png"))
+        logging.info("[/정보] done")
 
     except asyncio.TimeoutError:
-        await interaction.followup.send("응답이 지연되어 중단했습니다. (이미지 생성/다운로드 타임아웃)")
-    except Exception:
-        # 여기서 raise 하면 Render에서 에러만 쌓이고 유저는 계속 대기할 수 있어서 막음
-        await interaction.followup.send("처리 중 오류가 발생했습니다. Render 로그를 확인해 주세요.")
+        logging.exception("[/정보] timeout")
+        await interaction.followup.send("응답이 지연되어 중단했습니다. (타임아웃)")
+    except Exception as e:
+        logging.exception("[/정보] error")
+        await interaction.followup.send(f"처리 중 오류가 발생했습니다: {type(e).__name__}")
 
 @bot.tree.command(name="퀘스트", description="일일 및 반복 VC 퀘스트 현황을 확인합니다.")
 async def quest(interaction: discord.Interaction):
