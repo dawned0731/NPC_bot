@@ -42,6 +42,20 @@ _FONT_PATH = os.path.join(_ASSET_DIR, "fonts", "Donoun Medium.ttf")  # 네가 �
 _BG_TEMPLATE = None  # type: Optional[Image.Image]
 _FONT_CACHE = {}     # size -> ImageFont.FreeTypeFont
 
+_QUEST_BG_PATH = os.path.join(_ASSET_DIR, "quest_banner_bg.png")
+_QUEST_BG_TEMPLATE = None  # type: Optional[Image.Image]
+
+def _get_quest_bg_template() -> Image.Image:
+    global _QUEST_BG_TEMPLATE
+    if _QUEST_BG_TEMPLATE is None:
+        try:
+            bg = Image.open(_QUEST_BG_PATH).convert("RGBA")
+        except Exception:
+            # 파일 없으면 rank_bg로 폴백
+            bg = _get_bg_template()
+        _QUEST_BG_TEMPLATE = bg
+    return _QUEST_BG_TEMPLATE
+
 
 def _get_bg_template() -> Image.Image:
     global _BG_TEMPLATE
@@ -205,6 +219,53 @@ def render_rank_card(
     img.save(buf, format="PNG")
     buf.seek(0)
     return buf
+
+def render_daily_quest_banner(
+    *,
+    display_name: str,
+    pct_int: int,
+    height: int = 70,
+    reward_pct: int = 1,
+) -> BytesIO:
+    """
+    채팅 한 줄 체감용 초슬림 배너 (아이콘 없음, 단일 행)
+    레이아웃:
+    [일일 퀘스트 성공!  경험치 1% 지급   |   서버 닉네임 님의   |   현재 경험치 37%]
+    """
+    bg = _get_quest_bg_template()
+    w = bg.size[0]
+    h = int(height)
+
+    base = bg.crop((0, 0, w, min(h, bg.size[1]))).copy()
+    if base.size[1] != h:
+        img = Image.new("RGBA", (w, h), (245, 245, 245, 255))
+        img.paste(base, (0, 0))
+    else:
+        img = base
+
+    draw = ImageDraw.Draw(img)
+    font = _get_font(18)
+
+    x = 18
+    y = (h - 18) // 2 - 1
+    max_w = w - (x * 2)
+
+    title = "일일 퀘스트 성공!"
+    reward = f"경험치 {reward_pct}% 지급"
+    nick = f"{display_name} 님의"
+    prog = f"현재 경험치 {max(0, min(100, int(pct_int)))}%"
+
+    sep = "   |   "
+    line = f"{title}  {reward}{sep}{nick}{sep}{prog}"
+
+    safe_line = _ellipsize(draw, line, font, max_w)
+    draw.text((x, y), safe_line, font=font, fill=(40, 40, 40, 255))
+
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    return buf
+
 
 # =======================================================================
 
@@ -975,15 +1036,59 @@ async def on_message(message):
         if not user_m["text"]["completed"]:
             user_m["text"]["count"] += 1
             if user_m["text"]["count"] >= MISSION_REQUIRED_MESSAGES:
-                # 유저 EXP에 바로 반영(메모리 상)
-                user_data["exp"] += MISSION_EXP_REWARD
+                # 유저 EXP에 바로 반영                (메모리 상)
+                # === 보상: 다음 레벨 필요 XP(현재 레벨 구간)의 1% ===
+                total_before = int(user_data.get("exp", 0))
+                lvl_before = calculate_level(total_before)
+                
+                prev_thr = THRESHOLDS[lvl_before - 1] if (lvl_before - 1) < len(THRESHOLDS) else THRESHOLDS[-1]
+                next_thr = THRESHOLDS[lvl_before] if lvl_before < len(THRESHOLDS) else THRESHOLDS[-1]
+                need_xp = max(1, int(next_thr - prev_thr))
+                
+                reward_xp = int(round(need_xp * 0.01))
+                reward_xp = max(10, min(reward_xp, 5000))  # 안전 클램프
+                
+                # EXP 반영
+                user_data["exp"] = total_before + reward_xp
                 user_data["level"] = calculate_level(user_data["exp"])
-                user_data["last_activity"] = time.time()  # ← (정책 선택) 미션 완료도 활동으로 간주하려면 유지, 아니면 제거
-
+                user_data["last_activity"] = time.time()
+                
+                # 현재 레벨 구간 진행도 %
+                lvl_after = int(user_data["level"])
+                prev_thr2 = THRESHOLDS[lvl_after - 1] if (lvl_after - 1) < len(THRESHOLDS) else THRESHOLDS[-1]
+                next_thr2 = THRESHOLDS[lvl_after] if lvl_after < len(THRESHOLDS) else THRESHOLDS[-1]
+                cur_xp = max(0, int(user_data["exp"]) - int(prev_thr2))
+                need_xp2 = max(1, int(next_thr2 - prev_thr2))
+                pct_int = int(round((cur_xp / need_xp2) * 100))
+                
+                # 로그
                 log_ch = bot.get_channel(LOG_CHANNEL_ID)
                 if log_ch:
-                    await log_ch.send(f"[🧾 로그] {message.author.display_name} 님 텍스트 미션 완료! +{MISSION_EXP_REWARD}XP")
-                await message.channel.send(f"🎯 {message.author.mention} 일일 미션 완료! +{MISSION_EXP_REWARD}XP 지급되었습니다.")
+                    await log_ch.send(
+                        f"[🧾 로그] {message.author.display_name} 님 텍스트 일일 퀘스트 완료! +{reward_xp}XP (1%)"
+                    )
+
+                # 배너 이미지 전송
+                try:
+                    buf = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            render_daily_quest_banner,
+                            display_name=message.author.display_name,
+                            pct_int=pct_int,
+                            height=70,
+                            reward_pct=1,
+                        ),
+                        timeout=6,
+                    )
+                    await message.channel.send(
+                        file=discord.File(fp=buf, filename="daily_quest.png"),
+                        delete_after=20,
+                    )
+                except Exception:
+                    await message.channel.send(
+                        f"🎯 {message.author.mention} 일일 퀘스트 완료! 경험치 1% 지급 (현재 {pct_int}%)",
+                        delete_after=20,
+                    )
                 user_m["text"]["completed"] = True
 
         # (중요) 전체 저장 제거 → 유저 단위 저장만
