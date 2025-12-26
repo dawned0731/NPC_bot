@@ -1082,12 +1082,10 @@ async def on_message(message):
                     )
                     await message.channel.send(
                         file=discord.File(fp=buf, filename="daily_quest.png"),
-                        delete_after=20,
                     )
                 except Exception:
                     await message.channel.send(
                         f"🎯 {message.author.mention} 일일 퀘스트 완료! 경험치 1% 지급 (현재 {pct_int}%)",
-                        delete_after=20,
                     )
                 user_m["text"]["completed"] = True
 
