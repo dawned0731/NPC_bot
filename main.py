@@ -244,10 +244,9 @@ def render_daily_quest_banner(
         img = base
 
     draw = ImageDraw.Draw(img)
-    font = _get_font(14)
+    font = _get_font(16)
 
     x = 18
-    y = 14
     max_w = w - (x * 2)
 
     title = "일일 퀘스트 성공!"
@@ -259,7 +258,12 @@ def render_daily_quest_banner(
     line = f"{title}  {reward}{sep}{nick}{sep}{prog}"
 
     safe_line = _ellipsize(draw, line, font, max_w)
-    draw.text((x, y), safe_line, font=font, fill=(40, 40, 40, 255))
+    
+    bbox = draw.textbbox((0, 0), safe_line, font=font)
+    text_h = bbox[3] - bbox[1]
+    y = (h - text_h) // 2
+    
+    draw.text((x, y), safe_line, font=font, fill=(0, 0, 0, 255))
 
     buf = BytesIO()
     img.save(buf, format="PNG")
