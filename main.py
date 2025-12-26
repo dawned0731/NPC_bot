@@ -261,7 +261,7 @@ def render_daily_quest_banner(
     
     bbox = draw.textbbox((0, 0), safe_line, font=font)
     text_h = bbox[3] - bbox[1]
-    y = (h - text_h) // 2
+    y = (h - text_h) // 2 - bbox[1]
     
     draw.text((x, y), safe_line, font=font, fill=(0, 0, 0, 255))
 
