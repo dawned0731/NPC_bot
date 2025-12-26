@@ -244,10 +244,10 @@ def render_daily_quest_banner(
         img = base
 
     draw = ImageDraw.Draw(img)
-    font = _get_font(18)
+    font = _get_font(14)
 
     x = 18
-    y = (h - 18) // 2 - 1
+    y = 14
     max_w = w - (x * 2)
 
     title = "일일 퀘스트 성공!"
@@ -1075,7 +1075,7 @@ async def on_message(message):
                             render_daily_quest_banner,
                             display_name=message.author.display_name,
                             pct_int=pct_int,
-                            height=70,
+                            height=40,
                             reward_pct=1,
                         ),
                         timeout=6,
