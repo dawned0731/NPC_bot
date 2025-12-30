@@ -1307,25 +1307,25 @@ async def config_cmd(
 
         embed = discord.Embed(title="⚙️ 서버 설정", color=discord.Color.blurple())
         embed.add_field(name="채널", value=(
-            f"log: {fmt_id(channels.get('log_channel_id'))}\n"
-            f"levelup: {fmt_id(channels.get('levelup_channel_id'))}\n"
-            f"inactive_log: {fmt_id(channels.get('inactive_log_channel_id'))}\n"
-            f"suggest_anon: {fmt_id(channels.get('suggest_anon_channel_id'))}\n"
-            f"suggest_real: {fmt_id(channels.get('suggest_real_channel_id'))}\n"
-            f"thread_role_channel: {fmt_id(channels.get('thread_role_channel_id'))}"
+            f"퀘스트 로그 채널 지정: {fmt_id(channels.get('log_channel_id'))}\n"
+            f"레벨업 공지 채널 지정: {fmt_id(channels.get('levelup_channel_id'))}\n"
+            f"미접속 로그 채널 지정: {fmt_id(channels.get('inactive_log_channel_id'))}\n"
+            f"건의함(익명) 채널 지정: {fmt_id(channels.get('suggest_anon_channel_id'))}\n"
+            f"건의함(실명) 채널 지정: {fmt_id(channels.get('suggest_real_channel_id'))}\n"
+            f"입장 첫 역할 채널 지정: {fmt_id(channels.get('thread_role_channel_id'))}"
         ), inline=False)
 
         embed.add_field(name="역할", value=(
-            f"thread_role: {fmt_id(roles.get('thread_role_id'))}"
+            f"첫 채팅 시 자동부여 역할: {fmt_id(roles.get('thread_role_id'))}"
         ), inline=False)
 
         embed.add_field(name="음성", value=(
-            f"afk_channel_ids: {voice.get('afk_channel_ids', [])}\n"
-            f"special_vc_category_ids: {voice.get('special_vc_category_ids', [])}"
+            f"잠수 채널 지정: {voice.get('afk_channel_ids', [])}\n"
+            f"특수 채널 지정: {voice.get('special_vc_category_ids', [])}"
         ), inline=False)
 
         embed.add_field(name="기능", value=(
-            f"season_voice_enabled: {features.get('season_voice_enabled', True)}"
+            f"역할 별 인원 표시방 지정: {features.get('season_voice_enabled', True)}"
         ), inline=False)
 
         # 시즌 매핑은 길어질 수 있으니 간단히
