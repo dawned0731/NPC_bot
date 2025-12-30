@@ -429,6 +429,107 @@ async def aget_user_mission(uid: str, today: str):
         return val or base
     return await asyncio.to_thread(_get)
 
+# =========================
+# Guild (server) config IO
+# =========================
+
+_GUILD_CONFIG_CACHE = {}          # guild_id(str) -> dict
+_GUILD_CONFIG_CACHE_TS = {}       # guild_id(str) -> float
+_GUILD_CONFIG_TTL = 30.0          # seconds
+
+def _guild_cfg_ref(guild_id: int):
+    return db.reference("guild_config").child(str(guild_id))
+
+def _default_guild_config() -> dict:
+    # 최소 스키마. 없으면 dict 합치기 쉬움.
+    return {
+        "channels": {},
+        "roles": {},
+        "voice": {
+            "afk_channel_ids": [],
+            "special_vc_category_ids": [],
+        },
+        "season_map": {},  # "봄": {"role_id":..., "channel_id":...}
+        "features": {
+            "season_voice_enabled": True,
+        }
+    }
+    
+_COUNT_SUFFIX_RE = re.compile(r"(\d+)명$")
+
+def _replace_count_suffix(name: str, count: int):
+    m = _COUNT_SUFFIX_RE.search(name or "")
+    if not m:
+        return None
+    return name[:m.start(1)] + f"{count}명"
+
+
+async def aget_guild_config(guild_id: int) -> dict:
+    now = time.time()
+    gid = str(guild_id)
+    ts = _GUILD_CONFIG_CACHE_TS.get(gid, 0.0)
+    if gid in _GUILD_CONFIG_CACHE and (now - ts) < _GUILD_CONFIG_TTL:
+        return _GUILD_CONFIG_CACHE[gid]
+
+    def _get():
+        val = _guild_cfg_ref(guild_id).get() or {}
+        base = _default_guild_config()
+        # 얕은 병합(필요 키 보장)
+        for k, v in base.items():
+            if k not in val or not isinstance(val.get(k), type(v)):
+                val[k] = v
+        return val
+
+    cfg = await asyncio.to_thread(_get)
+    _GUILD_CONFIG_CACHE[gid] = cfg
+    _GUILD_CONFIG_CACHE_TS[gid] = now
+    return cfg
+
+async def aset_guild_config_field(guild_id: int, path: str, value):
+    # path 예: "channels/log_channel_id"
+    def _set():
+        ref = _guild_cfg_ref(guild_id)
+        parts = [p for p in path.split("/") if p]
+        node = ref
+        for p in parts[:-1]:
+            node = node.child(p)
+        node.child(parts[-1]).set(value)
+
+    await asyncio.to_thread(_set)
+    # 캐시 무효화
+    gid = str(guild_id)
+    _GUILD_CONFIG_CACHE.pop(gid, None)
+    _GUILD_CONFIG_CACHE_TS.pop(gid, None)
+
+def _cfg_get(cfg: dict, *keys, default=None):
+    cur = cfg
+    for k in keys:
+        if not isinstance(cur, dict) or k not in cur:
+            return default
+        cur = cur[k]
+    return cur
+
+async def get_channel_from_cfg(guild: discord.Guild, cfg: dict, key: str, fallback_id: int | None):
+    # key: "log_channel_id" 같은 단일 키를 channels에서 찾음
+    ch_id = _cfg_get(cfg, "channels", key, default=None)
+    if isinstance(ch_id, int):
+        return guild.get_channel(ch_id)
+    if isinstance(ch_id, str) and ch_id.isdigit():
+        return guild.get_channel(int(ch_id))
+    if fallback_id:
+        return guild.get_channel(fallback_id)
+    return None
+
+async def get_role_from_cfg(guild: discord.Guild, cfg: dict, key: str, fallback_id: int | None):
+    role_id = _cfg_get(cfg, "roles", key, default=None)
+    if isinstance(role_id, int):
+        return guild.get_role(role_id)
+    if isinstance(role_id, str) and role_id.isdigit():
+        return guild.get_role(int(role_id))
+    if fallback_id:
+        return guild.get_role(fallback_id)
+    return None
+
 
 def load_exp_data():
     """사용자 경험치 데이터를 Realtime DB에서 가져옵니다."""
@@ -739,7 +840,7 @@ async def on_ready():
             print(f"❌ 슬래시 커맨드 동기화 실패: {e!r}")
 
     # 4) 백그라운드 태스크 안전 시작(중복 방지)
-    for task in (voice_xp_task, reset_daily_missions, repeat_vc_mission_task, inactive_user_log_task):
+    for task in (voice_xp_task, reset_daily_missions, repeat_vc_mission_task, inactive_user_log_task, voice_count_channel_task):
         try:
             if not task.is_running():
                 task.start()
@@ -857,6 +958,13 @@ async def voice_xp_task():
     now_ts = time.time()
 
     for guild in bot.guilds:
+        cfg = await aget_guild_config(guild.id)
+        afk_ids = _cfg_get(cfg, "voice", "afk_channel_ids", default=AFK_CHANNEL_IDS) or []
+        sp_cat_ids = _cfg_get(cfg, "voice", "special_vc_category_ids", default=SPECIAL_VC_CATEGORY_IDS) or []
+
+        afk_ids = [int(x) for x in afk_ids if str(x).isdigit()]
+        sp_cat_ids = [int(x) for x in sp_cat_ids if str(x).isdigit()]
+
         # 보이스 + 스테이지 채널 모두 포함
         try:
             voice_like_channels = list(guild.voice_channels) + list(getattr(guild, "stage_channels", []))
@@ -864,10 +972,12 @@ async def voice_xp_task():
             voice_like_channels = list(guild.voice_channels)
 
         for vc in voice_like_channels:
-            if vc.id in AFK_CHANNEL_IDS:
+            if vc.id in afk_ids:
                 continue
 
-            is_special = vc.category and vc.category.id in SPECIAL_VC_CATEGORY_IDS
+            is_special = vc.category and vc.category.id in sp_cat_ids
+
+
             for member in vc.members:
                 if member.bot:
                     continue
@@ -898,7 +1008,8 @@ async def voice_xp_task():
                         await update_role_and_nick(member, new_level)
 
                         # 레벨업 알림 유지
-                        announce = bot.get_channel(LEVELUP_ANNOUNCE_CHANNEL)
+                        cfg = await aget_guild_config(guild.id)
+                        announce = await get_channel_from_cfg(guild, cfg, "levelup_channel_id", LEVELUP_ANNOUNCE_CHANNEL)
                         if announce:
                             await announce.send(
                                 f"🎉 {member.display_name} 님이 Lv.{new_level} 에 도달했습니다! 🎊",
@@ -927,13 +1038,17 @@ async def repeat_vc_mission_task():
     today = datetime.now(KST).strftime("%Y-%m-%d")
 
     for guild in bot.guilds:
+        cfg = await aget_guild_config(guild.id)
+        afk_ids = _cfg_get(cfg, "voice", "afk_channel_ids", default=AFK_CHANNEL_IDS) or []
+        afk_ids = [int(x) for x in afk_ids if str(x).isdigit()]
+
          # 보이스 + 스테이지 채널 모두 포함
         voice_like_channels = list(guild.voice_channels) + list(getattr(guild, "stage_channels", []))
         for vc in voice_like_channels:
             humans = [m for m in vc.members if not m.bot]
 
             # 🅰 AFK 채널은 미션 지급 제외 (이유 로그)
-            if vc.id in AFK_CHANNEL_IDS:
+            if vc.id in afk_ids:
                 logging.debug(f"[repeat_vc_mission] skip AFK vc_id={vc.id}")
                 continue
 
@@ -976,6 +1091,25 @@ async def repeat_vc_mission_task():
     except Exception as e:
         print(f"❌ 미션 로컬 백업 실패: {e}")
 
+@tasks.loop(seconds=60)
+async def voice_count_channel_task():
+    for guild in bot.guilds:
+        cfg = await aget_guild_config(guild.id)
+        items = cfg.get("voice_count_channels", [])
+        if not items:
+            continue
+
+        for it in items:
+            role = guild.get_role(int(it["role_id"]))
+            ch = guild.get_channel(int(it["channel_id"]))
+            if not role or not ch:
+                continue
+
+            count = sum(1 for m in role.members if not m.bot)
+            new_name = _replace_count_suffix(ch.name, count)
+            if new_name and new_name != ch.name:
+                await ch.edit(name=new_name)
+
 
 @bot.event
 async def on_message(message):
@@ -1002,8 +1136,12 @@ async def on_message(message):
         text_lower = text.lower()
 
         # 1) 특정 스레드 채팅 감지 시 역할 자동 부여 (권한/널 가드)
-        if getattr(message.channel, "id", None) == THREAD_ROLE_CHANNEL_ID and message.guild:
-            role = message.guild.get_role(THREAD_ROLE_ID)
+        cfg = await aget_guild_config(message.guild.id)
+        thread_ch_id = _cfg_get(cfg, "channels", "thread_role_channel_id", default=THREAD_ROLE_CHANNEL_ID)
+        thread_role_id = _cfg_get(cfg, "roles", "thread_role_id", default=THREAD_ROLE_ID)
+
+        if getattr(message.channel, "id", None) == int(thread_ch_id) and message.guild:
+            role = message.guild.get_role(int(thread_role_id)) if thread_role_id else None
             member = getattr(message, "author", None)
             if role and isinstance(member, discord.Member) and role not in member.roles:
                 try:
@@ -1065,12 +1203,14 @@ async def on_message(message):
                 need_xp2 = max(1, int(next_thr2 - prev_thr2))
                 pct_int = int(round((cur_xp / need_xp2) * 100))
                 
-                # 로그
-                log_ch = bot.get_channel(LOG_CHANNEL_ID)
+                # 로그                
+                cfg = await aget_guild_config(message.guild.id)
+                log_ch = await get_channel_from_cfg(message.guild, cfg, "log_channel_id", LOG_CHANNEL_ID)
                 if log_ch:
                     await log_ch.send(
                         f"[🧾 로그] {message.author.display_name} 님 텍스트 일일 퀘스트 완료! +{reward_xp}XP (1%)"
                     )
+
 
                 # 배너 이미지 전송
                 try:
@@ -1110,6 +1250,163 @@ SUGGEST_REAL_CHANNEL_ID = 1410186411310710847  # 실명 건의함 채널 ID
 OWNER_ID = 792661958549045249                  # 서버 오너(본인) ID
 
 from discord import Embed
+
+# =========================
+# /설정 commands (admin only)
+# =========================
+
+@app_commands.default_permissions(administrator=True)
+@bot.tree.command(name="설정", description="서버별 봇 설정을 변경/조회합니다.")
+@app_commands.describe(
+    작업="view/set_channel/set_role/add_afk/remove_afk/toggle_season/set_season_map",
+    종류="설정 종류(예: log, levelup, inactive_log, suggest_anon, suggest_real, thread_role_channel, thread_role)",
+    채널="지정할 채널(해당 시)",
+    역할="지정할 역할(해당 시)",
+    계절="봄/여름/가을/겨울",
+    음성채널="시즌 음성 채널",
+    onoff="true/false"
+)
+@app_commands.choices(
+    작업=[
+        app_commands.Choice(name="보기", value="view"),
+        app_commands.Choice(name="채널지정", value="set_channel"),
+        app_commands.Choice(name="역할지정", value="set_role"),
+        app_commands.Choice(name="AFK채널추가", value="add_afk"),
+        app_commands.Choice(name="AFK채널제거", value="remove_afk"),
+        app_commands.Choice(name="시즌기능ONOFF", value="toggle_season"),
+        app_commands.Choice(name="시즌매핑지정", value="set_season_map"),
+    ]
+)
+async def config_cmd(
+    interaction: discord.Interaction,
+    작업: str,
+    종류: str = None,
+    채널: discord.TextChannel | discord.VoiceChannel | discord.StageChannel = None,
+    역할: discord.Role = None,
+    계절: str = None,
+    음성채널: discord.VoiceChannel | discord.StageChannel = None,
+    onoff: str = None,
+):
+    if not interaction.guild:
+        return await interaction.response.send_message("DM에서는 사용할 수 없습니다.", ephemeral=True)
+
+    gid = interaction.guild.id
+
+    # 1) 보기
+    if 작업 == "view":
+        cfg = await aget_guild_config(gid)
+
+        def fmt_id(v):
+            return str(v) if v else "미설정"
+
+        channels = cfg.get("channels", {})
+        roles = cfg.get("roles", {})
+        voice = cfg.get("voice", {})
+        features = cfg.get("features", {})
+        season_map = cfg.get("season_map", {})
+
+        embed = discord.Embed(title="⚙️ 서버 설정", color=discord.Color.blurple())
+        embed.add_field(name="채널", value=(
+            f"log: {fmt_id(channels.get('log_channel_id'))}\n"
+            f"levelup: {fmt_id(channels.get('levelup_channel_id'))}\n"
+            f"inactive_log: {fmt_id(channels.get('inactive_log_channel_id'))}\n"
+            f"suggest_anon: {fmt_id(channels.get('suggest_anon_channel_id'))}\n"
+            f"suggest_real: {fmt_id(channels.get('suggest_real_channel_id'))}\n"
+            f"thread_role_channel: {fmt_id(channels.get('thread_role_channel_id'))}"
+        ), inline=False)
+
+        embed.add_field(name="역할", value=(
+            f"thread_role: {fmt_id(roles.get('thread_role_id'))}"
+        ), inline=False)
+
+        embed.add_field(name="음성", value=(
+            f"afk_channel_ids: {voice.get('afk_channel_ids', [])}\n"
+            f"special_vc_category_ids: {voice.get('special_vc_category_ids', [])}"
+        ), inline=False)
+
+        embed.add_field(name="기능", value=(
+            f"season_voice_enabled: {features.get('season_voice_enabled', True)}"
+        ), inline=False)
+
+        # 시즌 매핑은 길어질 수 있으니 간단히
+        sm_lines = []
+        for k in ["봄", "여름", "가을", "겨울"]:
+            v = season_map.get(k) or {}
+            sm_lines.append(f"{k}: role={v.get('role_id','미설정')}, channel={v.get('channel_id','미설정')}")
+        embed.add_field(name="시즌 매핑", value="\n".join(sm_lines), inline=False)
+
+        return await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    # 2) 채널 지정
+    if 작업 == "set_channel":
+        if not 종류 or not 채널:
+            return await interaction.response.send_message("종류와 채널을 지정하세요.", ephemeral=True)
+
+        key_map = {
+            "log": "log_channel_id",
+            "levelup": "levelup_channel_id",
+            "inactive_log": "inactive_log_channel_id",
+            "suggest_anon": "suggest_anon_channel_id",
+            "suggest_real": "suggest_real_channel_id",
+            "thread_role_channel": "thread_role_channel_id",
+        }
+        if 종류 not in key_map:
+            return await interaction.response.send_message(f"알 수 없는 종류: {종류}", ephemeral=True)
+
+        await aset_guild_config_field(gid, f"channels/{key_map[종류]}", int(채널.id))
+        return await interaction.response.send_message(f"✅ 채널 설정 완료: {종류} = {채널.mention}", ephemeral=True)
+
+    # 3) 역할 지정
+    if 작업 == "set_role":
+        if not 종류 or not 역할:
+            return await interaction.response.send_message("종류와 역할을 지정하세요.", ephemeral=True)
+
+        key_map = {
+            "thread_role": "thread_role_id",
+        }
+        if 종류 not in key_map:
+            return await interaction.response.send_message(f"알 수 없는 종류: {종류}", ephemeral=True)
+
+        await aset_guild_config_field(gid, f"roles/{key_map[종류]}", int(역할.id))
+        return await interaction.response.send_message(f"✅ 역할 설정 완료: {종류} = {역할.name}", ephemeral=True)
+
+    # 4) AFK 채널 추가/제거
+    if 작업 in ("add_afk", "remove_afk"):
+        if not 채널:
+            return await interaction.response.send_message("AFK로 지정할 음성/스테이지 채널을 선택하세요.", ephemeral=True)
+
+        cfg = await aget_guild_config(gid)
+        lst = cfg.get("voice", {}).get("afk_channel_ids", []) or []
+        lst = [int(x) for x in lst if str(x).isdigit()]
+
+        cid = int(채널.id)
+        if 작업 == "add_afk" and cid not in lst:
+            lst.append(cid)
+        if 작업 == "remove_afk" and cid in lst:
+            lst.remove(cid)
+
+        await aset_guild_config_field(gid, "voice/afk_channel_ids", lst)
+        return await interaction.response.send_message(f"✅ AFK 목록 업데이트: {lst}", ephemeral=True)
+
+    # 5) 시즌 기능 ON/OFF
+    if 작업 == "toggle_season":
+        if onoff not in ("true", "false"):
+            return await interaction.response.send_message("onoff는 true/false 중 하나여야 합니다.", ephemeral=True)
+        val = (onoff == "true")
+        await aset_guild_config_field(gid, "features/season_voice_enabled", val)
+        return await interaction.response.send_message(f"✅ 시즌 음성 기능: {val}", ephemeral=True)
+
+    # 6) 시즌 매핑 지정
+    if 작업 == "set_season_map":
+        if 계절 not in ("봄", "여름", "가을", "겨울") or not 역할 or not 음성채널:
+            return await interaction.response.send_message("계절(봄/여름/가을/겨울), 역할, 음성채널을 모두 지정하세요.", ephemeral=True)
+
+        await aset_guild_config_field(gid, f"season_map/{계절}", {"role_id": int(역할.id), "channel_id": int(음성채널.id)})
+        return await interaction.response.send_message(f"✅ 시즌 매핑 설정: {계절}", ephemeral=True)
+
+    return await interaction.response.send_message("알 수 없는 작업입니다.", ephemeral=True)
+
+
 
 @bot.tree.command(name="건의함", description="건의사항을 관리자에게 전달합니다.")
 @app_commands.describe(
@@ -1227,15 +1524,40 @@ async def grant_xp(interaction: discord.Interaction, member: discord.Member, amo
         # 역할·닉네임 변경 (데바운스 적용)
         await update_role_and_nick(member, new_level)
         # 레벨업 알림
-        ch_log = bot.get_channel(LEVELUP_ANNOUNCE_CHANNEL)
-        if ch_log:
-            await ch_log.send(
+        cfg = await aget_guild_config(guild.id)
+        announce = await get_channel_from_cfg(guild, cfg, "levelup_channel_id", LEVELUP_ANNOUNCE_CHANNEL)
+        if announce:
+            await announce.send(
                 f"🎉 {member.display_name} 님이 Lv.{new_level} 에 도달했습니다! 🎊",
                 allowed_mentions=ALLOW_NO_PING
             )
 
     await asave_user_exp(uid, user_data)
     await interaction.response.send_message(f"✅ {member.mention}에게 경험치 {amount}XP 지급 완료!", ephemeral=True)
+
+@app_commands.default_permissions(administrator=True)
+@bot.tree.command(name="인원채널_생성", description="역할 인원수를 표시하는 음성채널 생성")
+async def create_count_channel(
+    interaction: discord.Interaction,
+    역할: discord.Role,
+    제목: str = "임시 제목"
+):
+    guild = interaction.guild
+    if not guild:
+        return
+
+    ch = await guild.create_voice_channel(f"{제목} : 0명")
+
+    cfg = await aget_guild_config(guild.id)
+    items = cfg.get("voice_count_channels", [])
+    items.append({"role_id": 역할.id, "channel_id": ch.id})
+
+    await aset_guild_config_field(guild.id, "voice_count_channels", items)
+
+    await interaction.response.send_message(
+        f"완료: {ch.mention}\n채널명 끝의 `n명`만 자동 갱신됩니다.",
+        ephemeral=True
+    )
 
 
 @app_commands.default_permissions(administrator=True)
@@ -1458,7 +1780,8 @@ async def attend(interaction: discord.Interaction):
     ue["last_activity"] = time.time()
 
     if ue["level"] > prev_level:
-        announce = bot.get_channel(LEVELUP_ANNOUNCE_CHANNEL)
+        cfg = await aget_guild_config(guild.id)
+        announce = await get_channel_from_cfg(guild, cfg, "levelup_channel_id", LEVELUP_ANNOUNCE_CHANNEL)
         if announce:
             await announce.send(
                 f"🎉 {interaction.user.display_name} 님이 Lv.{ue['level']} 에 도달했습니다! 🎊",
