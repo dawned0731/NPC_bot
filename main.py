@@ -419,8 +419,44 @@ async def aset_attendance_data(user_id, data):
 
 async def aget_user_exp(uid: str):
     def _get():
-        return db.reference("exp_data").child(uid).get() or {"exp": 0, "level": 1, "voice_minutes": 0}
+        raw = db.reference("exp_data").child(uid).get()
+
+        # 1) 레코드 자체가 없으면 기본값
+        if not isinstance(raw, dict):
+            return {"exp": 0, "level": 1, "voice_minutes": 0}
+
+        # 2) exp 보정 (없거나 타입 이상하면 0)
+        exp = raw.get("exp", 0)
+        try:
+            exp = int(exp)
+        except Exception:
+            exp = 0
+        if exp < 0:
+            exp = 0
+
+        # 3) 나머지 키도 기본값 보장
+        vm = raw.get("voice_minutes", 0)
+        try:
+            vm = int(vm)
+        except Exception:
+            vm = 0
+        if vm < 0:
+            vm = 0
+
+        lvl = raw.get("level", 1)
+        try:
+            lvl = int(lvl)
+        except Exception:
+            lvl = 1
+
+        # 4) 반환값은 “항상 완전한 스키마”
+        raw["exp"] = exp
+        raw["voice_minutes"] = vm
+        raw["level"] = lvl
+        return raw
+
     return await asyncio.to_thread(_get)
+
 
 async def aget_user_mission(uid: str, today: str):
     def _get():
@@ -871,7 +907,17 @@ async def on_member_update(before, after):
         # DB에서 경험치, 레벨 로드 후 역할/닉네임 동기화
         uid = str(after.id)
         user_data = await aget_user_exp(uid)
-        new_level = calculate_level(user_data["exp"])
+
+        # ✅ 신입(또는 스키마 깨진 유저) 최초 1회 저장
+        # - exp/level/voice_minutes가 비정상/누락이어도 aget_user_exp에서 보정됨
+        # - 여기서 DB에 “정상 스키마”로 박아두면 이후 이벤트에서 재발 방지됨
+        try:
+            await asave_user_exp(uid, user_data)
+        except Exception:
+            pass
+
+        new_level = calculate_level(user_data.get("exp", 0))
+
 
         # 역할/닉네임 동기화 (데바운스 적용 + 예외 내성)
         try:
