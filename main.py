@@ -275,6 +275,153 @@ def render_daily_quest_banner(
 
 KST = pytz.timezone("Asia/Seoul")  # ← 추가
 
+# =========================
+# Attendance (출석) 메시지/보호권 설정
+# =========================
+ATTEND_MILESTONE_STREAKS = {3, 7, 14, 30, 50, 100}
+
+ATTEND_MSG_ALREADY = [
+    "📺 (속보) {mention} 오늘 출석, 이미 처리 완료",
+    "🧾 (기록 확인) {mention} 오늘 도장: 찍힘",
+    "🕰️ (리마인드) {mention} 오늘 건은 수령 완료 상태",
+    "🚫 (제한 안내) {mention} 1일 1회 규정 적용 중",
+    "🔒 (봉인됨) {mention} 오늘 출석 슬롯: 닫힘",
+    "📌 (체크 완료) {mention} 오늘 항목: 완료 표시",
+    "🎛️ (시스템) {mention} 중복 요청 감지: 처리 생략",
+    "📷 (현장) {mention} 이미 찍힌 도장 화면 확보",
+    "🗂️ (로그) {mention} 오늘자 출석 로그 존재",
+    "📦 (수령 내역) {mention} 오늘 보상: 수령됨",
+    "🧯 (과열 방지) {mention} 연타 방지 모드 작동",
+    "🧊 (쿨다운) {mention} 오늘은 여기까지",
+    "📎 (첨부) {mention} 오늘 출석 확인서 발급 완료",
+    "🔔 (알림) {mention} 오늘 출석은 이미 끝난 이야기",
+    "🧷 (고정) {mention} 오늘 체크는 더 이상 갱신되지 않음",
+]
+
+ATTEND_MSG_SUCCESS = [
+    "🎉 (자막) {mention} 오늘도 무사 통과",
+    "🥁 (효과음) {mention} 도장 “딱”",
+    "🏁 (완료) {mention} 오늘 구간 클리어",
+    "📌 (확정) {mention} 출석 처리 완료",
+    "📈 (상승) {mention} 연속 기록 유지 중",
+    "🔥 (유지력) {mention} 루틴이 꺼지지 않는다",
+    "🧭 (정상 항로) {mention} 오늘도 경로 이탈 없음",
+    "🧱 (적립) {mention} 한 칸 추가 적립",
+    "🎬 (엔딩) {mention} 오늘의 출석, 깔끔한 마무리",
+    "📣 (공지) {mention} 출석 완료 처리되었습니다",
+    "🗃️ (저장) {mention} 오늘 기록 저장 완료",
+    "🧲 (흡착) {mention} 습관이 또 붙었다",
+    "🎯 (명중) {mention} 출석 타이밍 적중",
+    "🛎️ (완료음) {mention} 처리 완료 신호",
+    "📡 (송출) {mention} 출석 성공 신호 수신",
+    "🧨 (기세) {mention} 연속 흐름 계속 간다",
+    "🧽 (깔끔) {mention} 오늘도 정리정돈 완료",
+    "🪪 (인증) {mention} 오늘 출석 인증 통과",
+    "🔧 (정상 작동) {mention} 출석 모듈 이상 없음",
+    "🎊 (장면 전환) {mention} 다음 출석은 내일로 넘어갑니다",
+]
+
+ATTEND_MSG_FIRST = [
+    "🆕 (감지) {mention} 새로운 출석 기록 생성",
+    "🎬 (오프닝) {mention} 1일차 장면 시작",
+    "📍 (첫 체크) {mention} 오늘이 첫 도장입니다",
+    "🗂️ (신규 등록) {mention} 출석 카드 발급 완료",
+    "🚦 (출발) {mention} 이제부터 누적이 쌓입니다",
+    "🧩 (첫 조각) {mention} 퍼즐 1칸 채움",
+    "🏗️ (기초 공사) {mention} 기록의 바닥을 다졌습니다",
+    "🎟️ (입장) {mention} 출석 루틴에 입장했습니다",
+    "🧾 (초안 작성) {mention} 오늘부터 로그가 남습니다",
+    "🔰 (스타트) {mention} 시작 마크 확인",
+]
+
+ATTEND_MSG_RESET = [
+    "🧊 (알림) {mention} 연속 기록이 1일로 재설정됩니다",
+    "📉 (변동) {mention} 연속 흐름이 끊겼습니다",
+    "🪓 (컷) {mention} 콤보 종료, 오늘부터 다시 시작",
+    "🧯 (진화) {mention} 불은 꺼졌고, 다시 붙이면 됩니다",
+    "🕳️ (이탈) {mention} 연속 구간에서 벗어났습니다",
+    "🧽 (리셋) {mention} 연속 수치 초기화 처리",
+    "🔄 (재정렬) {mention} 연속 기록 1일차로 정렬",
+    "📎 (참고) {mention} 누적은 유지, 연속만 리셋",
+    "🪫 (방전) {mention} 연속 배터리 0%, 오늘부터 충전",
+    "⛔ (중단) {mention} 연속 기록 중단 확인",
+    "🧱 (재시작) {mention} 다시 한 칸부터 쌓습니다",
+    "📌 (확정) {mention} 연속 끊김 상태로 출석 처리",
+]
+
+ATTEND_MSG_SHIELD_USED = [
+    "🛡️ (방어 성공) {mention} 보호권 1장 소모, 연속 기록 유지",
+    "🛡️ (처리) {mention} 보호권 사용 완료 — 흐름이 이어집니다",
+    "🛡️ (복구) {mention} 연속 구간 복원 처리",
+    "🛡️ (세이브) {mention} 기록이 보호되었습니다",
+    "🛡️ (판정) {mention} 끊김 판정 무효 처리",
+    "🛡️ (유지) {mention} 연속 {streak}일 유지 성공",
+]
+
+ATTEND_MSG_SHIELD_SKIPPED = [
+    "✅ (확정) {mention} 보호권 미사용 — 연속은 1일부터 재시작",
+    "📌 (처리) {mention} 출석은 완료, 연속 리셋 적용",
+    "📉 (반영) {mention} 끊김 상태로 기록 저장",
+    "🔄 (결정 반영) {mention} 미사용 선택, 연속 초기화",
+    "🧊 (정리) {mention} 연속은 끊겼지만 누적은 유지됩니다",
+    "🏁 (완료) {mention} 오늘 출석 처리 종료",
+]
+
+ATTEND_MSG_MILESTONE = [
+    "🏅 (기록) {mention} 연속 {streak}일 달성",
+    "🎖️ (인증) {mention} 연속 {streak}일 구간 진입",
+    "📣 (특보) {mention} 연속 {streak}일, 축하 출력 송출",
+    "🧱 (누적) {mention} 연속 {streak}일, 기반이 단단해졌습니다",
+    "🎇 (이벤트) {mention} 연속 {streak}일 체크포인트 통과",
+    "🏁 (분기점) {mention} 연속 {streak}일 구간 완료",
+    "📌 (배지) {mention} 연속 {streak}일 표식 부착",
+    "🥇 (랭크업) {mention} 연속 {streak}일, 컨디션 최상",
+    "📈 (상향) {mention} 연속 {streak}일, 상승세 유지",
+    "🎬 (하이라이트) {mention} 연속 {streak}일 장면 저장",
+]
+
+def _safe_int(v, default: int = 0) -> int:
+    try:
+        return int(v)
+    except Exception:
+        return default
+
+def normalize_attendance_record(ud: dict | None) -> dict:
+    if not isinstance(ud, dict):
+        ud = {}
+    ud.setdefault("last_date", "")
+    ud["total_days"] = max(0, _safe_int(ud.get("total_days", 0), 0))
+    ud["streak"] = max(0, _safe_int(ud.get("streak", 0), 0))
+    if not isinstance(ud.get("weekly"), dict):
+        ud["weekly"] = {}
+    if not isinstance(ud.get("monthly"), dict):
+        ud["monthly"] = {}
+    ud["shield_tokens"] = max(0, _safe_int(ud.get("shield_tokens", 0), 0))
+    ud.setdefault("shield_grant_month", "")
+    return ud
+
+def ensure_monthly_shield_grant(ud: dict, now_kst: datetime) -> bool:
+    """
+    월 1회 보호권 1장 자동 지급(중복 방지).
+    - ud["shield_grant_month"]가 이번달 키와 다르면 1장 지급
+    """
+    month_key = get_month_key_kst(now_kst)  # 기존 월 키 포맷과 통일 (YYYY-M)
+    if ud.get("shield_grant_month") != month_key:
+        ud["shield_tokens"] = max(0, _safe_int(ud.get("shield_tokens", 0), 0)) + 1
+        ud["shield_grant_month"] = month_key
+        return True
+    return False
+
+def _until_next_attendance(now_kst: datetime) -> tuple[int, int]:
+    until = (now_kst.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)) - now_kst
+    h, m = divmod(int(until.total_seconds() // 60), 60)
+    return h, m
+
+def _build_attendance_stats_line(total_days: int, streak: int, gain: int | None = None) -> str:
+    if gain is None:
+        return f"누적 {total_days}일 · 연속 {streak}일"
+    return f"누적 {total_days}일 · 연속 {streak}일 · +{gain} XP"
+
 SAFEGUARD_DISABLE_EXTERNAL_IO = os.getenv("SAFEGUARD_DISABLE_EXTERNAL_IO", "1") == "1"
 SAFEGUARD_MIN_INTERVAL_GLOBAL = float(os.getenv("SAFEGUARD_MIN_INTERVAL_GLOBAL", "1.0"))  # 전역 처리 간 최소 간격(초)
 SAFEGUARD_MIN_INTERVAL_PER_CHANNEL = float(os.getenv("SAFEGUARD_MIN_INTERVAL_PER_CHANNEL", "2.0"))  # 채널별
@@ -416,6 +563,15 @@ async def aget_attendance_data():
 
 async def aset_attendance_data(user_id, data):
     return await asyncio.to_thread(set_attendance_data, user_id, data)
+
+async def aget_attendance_user(uid: str) -> dict:
+    return await asyncio.to_thread(get_attendance_user, uid)
+
+async def aset_attendance_user(uid: str, data: dict):
+    return await asyncio.to_thread(set_attendance_user, uid, data)
+
+async def abulk_update_attendance(updates: dict):
+    return await asyncio.to_thread(bulk_update_attendance, updates)
 
 async def aget_user_exp(uid: str):
     def _get():
@@ -616,6 +772,25 @@ def set_attendance_data(user_id, data):
         db.reference(ATTENDANCE_DB_KEY).child(user_id).set(data)
     except Exception as e:
         print(f"❌ set_attendance_data 실패: {e}")
+
+def get_attendance_user(user_id: str) -> dict:
+    """특정 유저 출석 데이터만 불러옵니다."""
+    raw = db.reference(ATTENDANCE_DB_KEY).child(user_id).get()
+    return raw if isinstance(raw, dict) else {}
+
+def set_attendance_user(user_id: str, data: dict):
+    """특정 유저 출석 데이터 저장"""
+    try:
+        db.reference(ATTENDANCE_DB_KEY).child(user_id).set(data)
+    except Exception as e:
+        print(f"❌ set_attendance_user 실패: {e}")
+
+def bulk_update_attendance(updates: dict):
+    """attendance_data 루트에 대해 update(부분 갱신)"""
+    try:
+        db.reference(ATTENDANCE_DB_KEY).update(updates)
+    except Exception as e:
+        print(f"❌ bulk_update_attendance 실패: {e}")
 
 def load_json(path):
     """로컬 JSON 파일 로드 (없으면 빈 dict)"""
@@ -876,7 +1051,7 @@ async def on_ready():
             print(f"❌ 슬래시 커맨드 동기화 실패: {e!r}")
 
     # 4) 백그라운드 태스크 안전 시작(중복 방지)
-    for task in (voice_xp_task, reset_daily_missions, repeat_vc_mission_task, inactive_user_log_task, voice_count_channel_task):
+    for task in (voice_xp_task, reset_daily_missions, repeat_vc_mission_task, monthly_attendance_shield_task, inactive_user_log_task, voice_count_channel_task):
         try:
             if not task.is_running():
                 task.start()
@@ -984,7 +1159,37 @@ async def inactive_user_log_task():
     # ✅ 아무도 추방되지 않았을 경우에도 로그 남기기
     if not kicked:
         await log_channel.send(f"✅ 현재 {INACTIVE_KICK_DAYS}일 이상 미접속 중인 사용자가 없습니다.")
+@tasks.loop(time=dtime(hour=15, minute=5))
+async def monthly_attendance_shield_task():
+    """
+    매월 1일(KST) 00:05에 모든 유저에게 출석 보호권 1장 자동 지급.
+    - 각 유저 레코드의 shield_grant_month로 중복 방지 (재시작/중복 실행에도 안전)
+    """
+    try:
+        now_kst = datetime.now(KST)
+        if now_kst.day != 1:
+            return
 
+        data = await aget_attendance_data()
+        if not isinstance(data, dict) or not data:
+            return
+
+        month_key = get_month_key_kst(now_kst)
+        updates = {}
+
+        for uid, ud in data.items():
+            ud = normalize_attendance_record(ud)
+            if ud.get("shield_grant_month") != month_key:
+                ud["shield_tokens"] = ud.get("shield_tokens", 0) + 1
+                ud["shield_grant_month"] = month_key
+                updates[str(uid)] = ud
+
+        if updates:
+            await abulk_update_attendance(updates)
+            print(f"🛡️ 월간 출석 보호권 지급 완료: {len(updates)}명 ({month_key})")
+    except Exception as e:
+        print(f"❌ monthly_attendance_shield_task error: {e!r}")
+        
 @tasks.loop(time=dtime(hour=15, minute=0))
 async def reset_daily_missions():
     """일일 미션 데이터 초기화 (로컬 및 DB)"""
@@ -1570,8 +1775,13 @@ async def grant_xp(interaction: discord.Interaction, member: discord.Member, amo
         # 역할·닉네임 변경 (데바운스 적용)
         await update_role_and_nick(member, new_level)
         # 레벨업 알림
-        cfg = await aget_guild_config(guild.id)
-        announce = await get_channel_from_cfg(guild, cfg, "levelup_channel_id", LEVELUP_ANNOUNCE_CHANNEL)
+        guild = interaction.guild
+        if guild:
+            cfg = await aget_guild_config(guild.id)
+            announce = await get_channel_from_cfg(guild, cfg, "levelup_channel_id", LEVELUP_ANNOUNCE_CHANNEL)
+        else:
+            announce = None
+            
         if announce:
             await announce.send(
                 f"🎉 {member.display_name} 님이 Lv.{new_level} 에 도달했습니다! 🎊",
@@ -1793,7 +2003,148 @@ async def ranking(interaction: discord.Interaction):
 
     await interaction.response.send_message(embed=embed)
 
+# =========================
+# Attendance 보호권 버튼 View
+# =========================
+class AttendanceShieldView(discord.ui.View):
+    def __init__(self, *, uid: str, owner_user_id: int):
+        super().__init__(timeout=60)
+        self.uid = uid
+        self.owner_user_id = owner_user_id
+        self.message: discord.Message | None = None
 
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_user_id:
+            try:
+                await interaction.response.send_message("이 버튼은 출석한 본인만 사용할 수 있습니다.", ephemeral=True)
+            except Exception:
+                pass
+            return False
+        return True
+
+    async def _apply(self, interaction: discord.Interaction, *, use_shield: bool):
+        await interaction.response.defer()
+
+        uid = self.uid
+        now = datetime.now(KST)
+        today_str = now.strftime("%Y-%m-%d")
+        yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+        week = get_week_key_kst(now)
+        month = get_month_key_kst(now)
+
+        ud = normalize_attendance_record(await aget_attendance_user(uid))
+
+        # 월간 보호권 자동 지급(지연 지급; 월간 태스크 미동작/재시작 대비)
+        ensure_monthly_shield_grant(ud, now)
+
+        prev_last = ud.get("last_date", "")
+        prev_streak = _safe_int(ud.get("streak", 0), 0)
+
+        # 이미 오늘 출석 처리된 경우(중복 클릭/동시 처리 방지)
+        if prev_last == today_str:
+            h, m = _until_next_attendance(now)
+            headline = random.choice(ATTEND_MSG_ALREADY).format(mention=interaction.user.mention)
+            content = "\n".join([
+                headline,
+                _build_attendance_stats_line(ud["total_days"], ud["streak"]),
+                f"다음 출석까지 {h}시간 {m}분",
+            ])
+            try:
+                await interaction.message.edit(content=content, view=None)
+            except Exception:
+                pass
+            return
+
+        natural_continue = (prev_last == yesterday)
+        is_first = (prev_last == "")
+
+        # 보호권 사용 조건: 자연 연속이 아니고, 첫 출석도 아니고, use_shield가 True
+        shield_tokens = _safe_int(ud.get("shield_tokens", 0), 0)
+        shield_used = False
+        if use_shield and (not natural_continue) and (not is_first) and shield_tokens > 0:
+            ud["shield_tokens"] = shield_tokens - 1
+            shield_used = True
+
+        # streak 계산
+        if is_first:
+            new_streak = 1
+        elif natural_continue or shield_used:
+            new_streak = prev_streak + 1
+        else:
+            new_streak = 1
+
+        # 출석 반영
+        ud["streak"] = new_streak
+        ud["last_date"] = today_str
+        ud["total_days"] = _safe_int(ud.get("total_days", 0), 0) + 1
+        ud.setdefault("weekly", {})[week] = _safe_int(ud["weekly"].get(week, 0), 0) + 1
+        ud.setdefault("monthly", {})[month] = _safe_int(ud["monthly"].get(month, 0), 0) + 1
+
+        # 경험치 지급
+        gain = 100 + min(new_streak - 1, 10) * 10
+        ue = await aget_user_exp(uid)
+        prev_level = ue["level"]
+        ue["exp"] += gain
+        ue["level"] = calculate_level(ue["exp"])
+        ue["last_activity"] = time.time()
+
+        # 레벨업 알림(안전)
+        if ue["level"] > prev_level:
+            guild = interaction.guild
+            if guild:
+                cfg = await aget_guild_config(guild.id)
+                announce = await get_channel_from_cfg(guild, cfg, "levelup_channel_id", LEVELUP_ANNOUNCE_CHANNEL)
+                if announce:
+                    try:
+                        await announce.send(
+                            f"🎉 {interaction.user.display_name} 님이 Lv.{ue['level']} 에 도달했습니다! 🎊",
+                            allowed_mentions=ALLOW_NO_PING
+                        )
+                    except Exception:
+                        pass
+
+        # 저장
+        await asave_user_exp(uid, ue)
+        await aset_attendance_user(uid, ud)
+        await update_role_and_nick(interaction.user, ue["level"])
+
+        # 출력 멘트 구성
+        if shield_used:
+            headline = random.choice(ATTEND_MSG_SHIELD_USED).format(mention=interaction.user.mention, streak=new_streak)
+        else:
+            headline = random.choice(ATTEND_MSG_SHIELD_SKIPPED).format(mention=interaction.user.mention)
+
+        lines = [headline]
+        if new_streak in ATTEND_MILESTONE_STREAKS:
+            lines.append(random.choice(ATTEND_MSG_MILESTONE).format(mention=interaction.user.mention, streak=new_streak))
+        lines.append(_build_attendance_stats_line(ud["total_days"], ud["streak"], gain))
+
+        content = "\n".join(lines)
+
+        # 버튼 비활성 + 메시지 갱신
+        try:
+            await interaction.message.edit(content=content, view=None)
+        except Exception:
+            pass
+
+    @discord.ui.button(label="🛡️ 보호권 사용(1장)", style=discord.ButtonStyle.success)
+    async def use_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._apply(interaction, use_shield=True)
+
+    @discord.ui.button(label="그냥 진행", style=discord.ButtonStyle.secondary)
+    async def skip_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._apply(interaction, use_shield=False)
+
+    async def on_timeout(self):
+        # 시간 초과: 버튼만 비활성화
+        try:
+            for item in self.children:
+                if hasattr(item, "disabled"):
+                    item.disabled = True
+            if self.message:
+                await self.message.edit(content=self.message.content + "\n(시간 초과: 다시 /출석을 실행해주세요)", view=self)
+        except Exception:
+            pass
 
 @bot.tree.command(name="출석", description="오늘의 출석을 기록합니다.")
 async def attend(interaction: discord.Interaction):
@@ -1803,63 +2154,97 @@ async def attend(interaction: discord.Interaction):
     yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
     week = get_week_key_kst(now)
     month = get_month_key_kst(now)
-    data = await aget_attendance_data()
-    ud = data.get(uid, {"last_date":"","total_days":0,"streak":0,"weekly":{},"monthly":{}})
+
+    # 유저 단위로만 로드 (전체 로드 방지)
+    ud = normalize_attendance_record(await aget_attendance_user(uid))
+
+    # 월간 보호권 자동 지급(지연 지급; 월간 태스크 미동작/재시작 대비)
+    ensure_monthly_shield_grant(ud, now)
+
     prev_last = ud.get("last_date", "")
 
+    # 이미 출석
     if prev_last == today_str:
-        until = (now.replace(hour=0,minute=0,second=0,microsecond=0)+timedelta(days=1)) - now
-        h, m = divmod(int(until.total_seconds()/60), 60)
-        return await interaction.response.send_message(f"이미 출석 완료! 다음 출석까지 {h}시간 {m}분 남음.")
-        
-    ud["streak"] = ud["streak"] + 1 if prev_last == yesterday else 1
+        h, m = _until_next_attendance(now)
+        headline = random.choice(ATTEND_MSG_ALREADY).format(mention=interaction.user.mention)
+        msg = "\n".join([
+            headline,
+            _build_attendance_stats_line(ud["total_days"], ud["streak"]),
+            f"다음 출석까지 {h}시간 {m}분",
+        ])
+        return await interaction.response.send_message(msg)
+
+    # 자연 연속 여부 / 첫 출석 여부
+    natural_continue = (prev_last == yesterday)
+    is_first = (prev_last == "")
+
+    # 연속이 끊길 상황 + 보호권 보유 시: 버튼으로 결정
+    if (not is_first) and (not natural_continue) and _safe_int(ud.get("shield_tokens", 0), 0) > 0:
+        tokens = _safe_int(ud.get("shield_tokens", 0), 0)
+        content = "\n".join([
+            f"{interaction.user.mention} (경고) 연속 출석이 끊길 상황입니다",
+            f"보유 보호권: {tokens}장 / 이번 출석 소모: 1장",
+            "보호권을 사용해 연속 기록을 유지할까요?",
+        ])
+        view = AttendanceShieldView(uid=uid, owner_user_id=interaction.user.id)
+        await interaction.response.send_message(content, view=view)
+        try:
+            view.message = await interaction.original_response()
+        except Exception:
+            pass
+        return
+
+    # 여기부터는 즉시 출석 처리 (첫 출석 / 자연 연속 / 보호권 없음)
+    prev_streak = _safe_int(ud.get("streak", 0), 0)
+    if is_first:
+        new_streak = 1
+        headline = random.choice(ATTEND_MSG_FIRST).format(mention=interaction.user.mention)
+    elif natural_continue:
+        new_streak = prev_streak + 1
+        headline = random.choice(ATTEND_MSG_SUCCESS).format(mention=interaction.user.mention)
+    else:
+        new_streak = 1
+        headline = random.choice(ATTEND_MSG_RESET).format(mention=interaction.user.mention)
+
+    ud["streak"] = new_streak
     ud["last_date"] = today_str
-    ud["total_days"] += 1
-    ud.setdefault("weekly", {})[week] = ud["weekly"].get(week,0)+1
-    ud.setdefault("monthly", {})[month] = ud["monthly"].get(month,0)+1
+    ud["total_days"] = _safe_int(ud.get("total_days", 0), 0) + 1
+    ud.setdefault("weekly", {})[week] = _safe_int(ud["weekly"].get(week, 0), 0) + 1
+    ud.setdefault("monthly", {})[month] = _safe_int(ud["monthly"].get(month, 0), 0) + 1
+
     # 경험치 지급
-    gain = 100 + min(ud["streak"] - 1, 10) * 10
+    gain = 100 + min(new_streak - 1, 10) * 10
     ue = await aget_user_exp(uid)
     prev_level = ue["level"]
     ue["exp"] += gain
     ue["level"] = calculate_level(ue["exp"])
     ue["last_activity"] = time.time()
 
+    # 레벨업 알림(안전)
     if ue["level"] > prev_level:
-        cfg = await aget_guild_config(guild.id)
-        announce = await get_channel_from_cfg(guild, cfg, "levelup_channel_id", LEVELUP_ANNOUNCE_CHANNEL)
-        if announce:
-            await announce.send(
-                f"🎉 {interaction.user.display_name} 님이 Lv.{ue['level']} 에 도달했습니다! 🎊",
-                allowed_mentions=ALLOW_NO_PING
-            )
-
+        guild = interaction.guild
+        if guild:
+            cfg = await aget_guild_config(guild.id)
+            announce = await get_channel_from_cfg(guild, cfg, "levelup_channel_id", LEVELUP_ANNOUNCE_CHANNEL)
+            if announce:
+                try:
+                    await announce.send(
+                        f"🎉 {interaction.user.display_name} 님이 Lv.{ue['level']} 에 도달했습니다! 🎊",
+                        allowed_mentions=ALLOW_NO_PING
+                    )
+                except Exception:
+                    pass
 
     await asave_user_exp(uid, ue)
-    await aset_attendance_data(uid, ud)
+    await aset_attendance_user(uid, ud)
     await update_role_and_nick(interaction.user, ue["level"])
-    first_attend = ud["total_days"] == 1
-    streak_reset = (ud["streak"] == 1 and prev_last != yesterday)
 
-    if first_attend:
-        intro = "✨ 출석! 빛나는 하루 되세요!"
-    elif streak_reset:
-        intro = "😥 연속 출석이 끊겼습니다! 다시 1일부터 시작합니다."
-    else:
-        intro = random.choice([
-            "🎉 출석 완료! 멋져요!",
-            "🥳 계속 달려볼까요?",
-            "🌞 좋은 하루의 시작이에요!",
-            "💪 출석 성공! 오늘도 파이팅!"
-        ])
+    lines = [headline]
+    if new_streak in ATTEND_MILESTONE_STREAKS:
+        lines.append(random.choice(ATTEND_MSG_MILESTONE).format(mention=interaction.user.mention, streak=new_streak))
+    lines.append(_build_attendance_stats_line(ud["total_days"], ud["streak"], gain))
 
-    msg = (
-      f"{intro}\n"
-      f"누적 출석: {ud['total_days']}일\n"
-      f"연속 출석: {ud['streak']}일\n"
-      f"경험치: +{gain} XP"
-      )
-    await interaction.response.send_message(msg)
+    await interaction.response.send_message("\n".join(lines))
 
 @bot.tree.command(name="출석랭킹", description="출석 랭킹을 확인합니다.")
 async def attend_ranking(interaction: discord.Interaction):
@@ -1897,6 +2282,59 @@ async def attend_ranking(interaction: discord.Interaction):
         embed.add_field(name="📍 내 순위", value=my_rank, inline=False)
 
     await interaction.response.send_message(embed=embed)
+    
+# =========================
+# Attendance Admin Commands
+# =========================
+@app_commands.default_permissions(administrator=True)
+@bot.tree.command(name="출석보호권지급", description="특정 유저에게 출석 보호권을 지급/회수합니다.")
+@app_commands.describe(member="대상 유저", amount="지급할 수량(음수면 회수)")
+async def attendance_shield_grant(interaction: discord.Interaction, member: discord.Member, amount: int):
+    uid = str(member.id)
+    ud = normalize_attendance_record(await aget_attendance_user(uid))
+    ud["shield_tokens"] = max(0, _safe_int(ud.get("shield_tokens", 0), 0) + _safe_int(amount, 0))
+    await aset_attendance_user(uid, ud)
+    await interaction.response.send_message(
+        f"🛡️ {member.mention} 보호권 수량 변경 완료: 현재 {ud['shield_tokens']}장",
+        ephemeral=True
+    )
+
+@app_commands.default_permissions(administrator=True)
+@bot.tree.command(name="출석수정", description="유저의 누적/연속 출석을 수정합니다.")
+@app_commands.describe(
+    member="대상 유저",
+    total_days="누적 출석일(0 이상)",
+    streak="연속 출석일(0 이상)",
+    last_date="마지막 출석일(선택, YYYY-MM-DD)"
+)
+async def attendance_edit(interaction: discord.Interaction, member: discord.Member, total_days: int, streak: int, last_date: str | None = None):
+    uid = str(member.id)
+    ud = normalize_attendance_record(await aget_attendance_user(uid))
+
+    ud["total_days"] = max(0, _safe_int(total_days, 0))
+    ud["streak"] = max(0, _safe_int(streak, 0))
+
+    if last_date is not None:
+        ld = last_date.strip()
+        if ld == "":
+            ud["last_date"] = ""
+        else:
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", ld):
+                return await interaction.response.send_message("❌ last_date 형식이 올바르지 않습니다. 예: 2026-02-24", ephemeral=True)
+            try:
+                datetime.strptime(ld, "%Y-%m-%d")
+            except Exception:
+                return await interaction.response.send_message("❌ last_date 값이 유효한 날짜가 아닙니다.", ephemeral=True)
+            ud["last_date"] = ld
+
+    await aset_attendance_user(uid, ud)
+    await interaction.response.send_message(
+        f"✅ {member.mention} 출석 수정 완료\n"
+        f"- 누적: {ud['total_days']}일\n"
+        f"- 연속: {ud['streak']}일\n"
+        f"- 마지막 출석일: {ud.get('last_date','') or '(없음)'}",
+        ephemeral=True
+    )
 
 # ---- 실행 및 웹 서버 유지 ----
 from aiohttp import web
