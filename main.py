@@ -512,6 +512,7 @@ EXP_PATH = "data/exp.json"
 MISSION_PATH = "data/mission.json"
 LOG_CHANNEL_ID = 1386685633136820248
 INACTIVE_LOG_CHANNEL_ID = 1386685633136820247
+DISCONNECT_LOG_CHANNEL_ID = 1506202471058509904
 INACTIVE_KICK_DAYS = 30  # 원하는 기준일로
 LEVELUP_ANNOUNCE_CHANNEL = 1386685634462093332
 TARGET_TEXT_CHANNEL_ID = 1386685633413775416
@@ -2333,6 +2334,132 @@ async def attendance_edit(interaction: discord.Interaction, member: discord.Memb
         f"- 누적: {ud['total_days']}일\n"
         f"- 연속: {ud['streak']}일\n"
         f"- 마지막 출석일: {ud.get('last_date','') or '(없음)'}",
+        ephemeral=True
+    )
+
+@bot.tree.command(name="연결끊기", description="현재 음성방에 있는 유저의 음성 연결을 끊습니다.")
+@app_commands.describe(
+    대상="연결을 끊을 대상",
+    사유="연결을 끊는 사유"
+)
+async def disconnect_voice(
+    interaction: discord.Interaction,
+    대상: discord.Member,
+    사유: str
+):
+    if not interaction.guild:
+        return await interaction.response.send_message(
+            "DM에서는 사용할 수 없습니다.",
+            ephemeral=True
+        )
+
+    사유 = (사유 or "").strip()
+
+    if not 사유:
+        return await interaction.response.send_message(
+            "❌ 연결 끊는 사유를 입력해주세요.",
+            ephemeral=True
+        )
+
+    if len(사유) > 500:
+        return await interaction.response.send_message(
+            "❌ 사유는 500자 이내로 입력해주세요.",
+            ephemeral=True
+        )
+
+    if not 대상.voice or not 대상.voice.channel:
+        return await interaction.response.send_message(
+            f"❌ {대상.display_name} 님은 현재 음성방에 참여 중이 아닙니다.",
+            ephemeral=True
+        )
+
+    await interaction.response.defer(ephemeral=True)
+
+    executor = interaction.user
+    voice_channel = 대상.voice.channel
+    now_str = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
+
+    dm_sent = True
+    try:
+        dm_embed = discord.Embed(
+            title="🔌 음성 연결이 종료되었습니다",
+            description=(
+                f"서버: {interaction.guild.name}\n"
+                f"처리자: {executor.display_name}\n"
+                f"사유: {사유}"
+            ),
+            color=discord.Color.orange()
+        )
+        dm_embed.set_footer(text=f"처리 시각: {now_str}")
+        await 대상.send(embed=dm_embed)
+    except Exception:
+        dm_sent = False
+
+    try:
+        await 대상.move_to(
+            None,
+            reason=f"/연결끊기 사용자={executor}({executor.id}) 사유={사유[:300]}"
+        )
+    except discord.Forbidden:
+        return await interaction.followup.send(
+            "❌ 봇에게 대상자의 음성 연결을 끊을 권한이 없습니다. "
+            "봇 역할에 `멤버 이동` 권한이 있는지 확인해주세요.",
+            ephemeral=True
+        )
+    except discord.HTTPException as e:
+        return await interaction.followup.send(
+            f"❌ 연결 끊기 처리 중 Discord 오류가 발생했습니다: {e}",
+            ephemeral=True
+        )
+    except Exception as e:
+        return await interaction.followup.send(
+            f"❌ 연결 끊기 처리 중 오류가 발생했습니다: {type(e).__name__}",
+            ephemeral=True
+        )
+
+    log_channel = interaction.guild.get_channel(DISCONNECT_LOG_CHANNEL_ID)
+
+    if log_channel:
+        log_embed = discord.Embed(
+            title="🔌 음성 연결 끊기 기록",
+            color=discord.Color.red()
+        )
+        log_embed.add_field(
+            name="처리자",
+            value=f"{executor.display_name} (`{executor.id}`)",
+            inline=False
+        )
+        log_embed.add_field(
+            name="대상자",
+            value=f"{대상.display_name} (`{대상.id}`)",
+            inline=False
+        )
+        log_embed.add_field(
+            name="대상 음성방",
+            value=f"{voice_channel.name} (`{voice_channel.id}`)",
+            inline=False
+        )
+        log_embed.add_field(
+            name="사유",
+            value=사유,
+            inline=False
+        )
+        log_embed.add_field(
+            name="DM 전송",
+            value="성공" if dm_sent else "실패",
+            inline=True
+        )
+        log_embed.set_footer(text=f"처리 시각: {now_str}")
+
+        try:
+            await log_channel.send(embed=log_embed, allowed_mentions=ALLOW_NO_PING)
+        except Exception:
+            pass
+
+    await interaction.followup.send(
+        f"✅ {대상.display_name} 님의 음성 연결을 끊었습니다.\n"
+        f"사유: {사유}\n"
+        f"DM 전송: {'성공' if dm_sent else '실패'}",
         ephemeral=True
     )
 
