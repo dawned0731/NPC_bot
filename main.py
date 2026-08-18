@@ -12,6 +12,7 @@ import re
 import asyncio
 import logging
 import copy
+import functools
 import pytz
 import aiohttp
 
@@ -514,6 +515,7 @@ LOG_CHANNEL_ID = 1386685633136820248
 INACTIVE_LOG_CHANNEL_ID = 1386685633136820247
 DISCONNECT_LOG_CHANNEL_ID = 1506202471058509904
 INACTIVE_KICK_DAYS = 30  # 원하는 기준일로
+INACTIVE_AUTO_KICK_ENABLED = os.getenv("INACTIVE_AUTO_KICK_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
 LEVELUP_ANNOUNCE_CHANNEL = 1386685634462093332
 TARGET_TEXT_CHANNEL_ID = 1386685633413775416
 THREAD_ROLE_CHANNEL_ID = 1386685633413775416
@@ -619,6 +621,57 @@ async def abulk_update_attendance(updates: dict):
 # 같은 유저에게 여러 보상 루프가 동시에 접근할 때 발생하는 덮어쓰기를 막습니다.
 _USER_STATE_LOCKS: dict[str, asyncio.Lock] = {}
 _LEVEL100_AWARD_CACHE: set[tuple[str, str]] = set()
+_SEASON_OPERATION_LOCKS: dict[int, asyncio.Lock] = {}
+
+
+def get_season_operation_lock(guild_id: int) -> asyncio.Lock:
+    key = int(guild_id)
+    lock = _SEASON_OPERATION_LOCKS.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _SEASON_OPERATION_LOCKS[key] = lock
+    return lock
+
+
+def season_operation_serialized():
+    """파괴적 시즌 관리 명령어가 같은 서버에서 동시에 실행되지 않게 합니다."""
+    def decorator(func):
+        @functools.wraps(func)
+        async def wrapper(interaction: discord.Interaction, *args, **kwargs):
+            guild = interaction.guild
+            if guild is None:
+                return await func(interaction, *args, **kwargs)
+
+            lock = get_season_operation_lock(guild.id)
+            if lock.locked():
+                message = "❌ 다른 시즌 관리 작업이 진행 중입니다. 완료된 뒤 다시 시도해주세요."
+                try:
+                    if interaction.response.is_done():
+                        return await interaction.followup.send(message, ephemeral=True)
+                    return await interaction.response.send_message(message, ephemeral=True)
+                except Exception:
+                    return None
+
+            async with lock:
+                return await func(interaction, *args, **kwargs)
+        return wrapper
+    return decorator
+
+
+def guard_background_task(name: str):
+    """한 번의 외부 서비스 오류로 반복 태스크 전체가 종료되지 않게 합니다."""
+    def decorator(func):
+        @functools.wraps(func)
+        async def wrapper(*args, **kwargs):
+            try:
+                return await func(*args, **kwargs)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logging.exception("[background-task:%s] iteration failed; next iteration will continue", name)
+                return None
+        return wrapper
+    return decorator
 
 
 def get_user_state_lock(uid: str | int) -> asyncio.Lock:
@@ -1719,26 +1772,6 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
         pass
 
 
-@bot.listen("on_interaction")
-async def _interaction_debug_listener(interaction: discord.Interaction):
-    """슬래시 명령어 Interaction이 현재 프로세스까지 도착하는지 로그로 확인합니다."""
-    try:
-        if interaction.type == discord.InteractionType.application_command:
-            command_name = None
-            data = getattr(interaction, "data", None)
-            if isinstance(data, dict):
-                command_name = data.get("name")
-            logging.info(
-                "[interaction] received command=%s user=%s guild=%s interaction_id=%s",
-                command_name or "unknown",
-                getattr(interaction.user, "id", None),
-                getattr(interaction.guild, "id", None),
-                getattr(interaction, "id", None),
-            )
-    except Exception:
-        logging.exception("[interaction] diagnostic listener failed")
-
-
 # ---- on_ready ----
 @bot.event
 async def on_ready():
@@ -1752,23 +1785,6 @@ async def on_ready():
 
     print(f"✅ {bot.user} 온라인")
     logging.info(f"[ready] logged in as {bot.user} (id={bot.user.id})")
-
-    # Discord Developer Portal에 Interactions Endpoint URL이 설정돼 있으면
-    # Gateway 방식의 슬래시 명령어가 이 봇 프로세스로 전달되지 않습니다.
-    try:
-        app_info = getattr(bot, "application", None)
-        endpoint_url = getattr(app_info, "interactions_endpoint_url", None) if app_info else None
-        if endpoint_url:
-            logging.error(
-                "[ready] CRITICAL: Interactions Endpoint URL is configured: %s -- "
-                "Gateway app commands will NOT be delivered to this bot.",
-                endpoint_url,
-            )
-        else:
-            logging.info("[ready] Interactions Endpoint URL: not configured (Gateway command delivery OK)")
-    except Exception:
-        logging.exception("[ready] failed to inspect Interactions Endpoint URL")
-
     await bot.change_presence(activity=discord.Game("제가 오프라인이라면, 서버장에게 말해주세요!"))
     
     # 3) 슬래시 커맨드 동기화: 최초 1회만
@@ -1837,9 +1853,14 @@ async def on_member_update(before, after):
 
 
 # ---- 백그라운드 태스크 정의 ----
-@tasks.loop(hours=24)
+@tasks.loop(time=dtime(hour=3, minute=0, tzinfo=pytz.FixedOffset(540)))
+@guard_background_task("inactive_user_log")
 async def inactive_user_log_task():
-    """장기 미접속 사용자 추방과 결과 로그를 처리합니다."""
+    """매일 03:00(KST)에 장기 미접속 사용자 추방과 결과 로그를 처리합니다."""
+    if not INACTIVE_AUTO_KICK_ENABLED:
+        logging.info("[inactive] automatic kick is disabled by INACTIVE_AUTO_KICK_ENABLED")
+        return
+
     threshold = datetime.now(KST) - timedelta(days=INACTIVE_KICK_DAYS)
 
     for guild in bot.guilds:
@@ -1904,7 +1925,8 @@ async def inactive_user_log_task():
                 f"✅ 현재 {INACTIVE_KICK_DAYS}일 이상 미접속 중인 사용자가 없습니다."
             )
         
-@tasks.loop(time=dtime(hour=15, minute=0))
+@tasks.loop(time=dtime(hour=0, minute=0, tzinfo=pytz.FixedOffset(540)))
+@guard_background_task("reset_daily_missions")
 async def reset_daily_missions():
     """매일 자정(KST)에 일일 미션 데이터를 초기화합니다."""
     try:
@@ -1915,6 +1937,7 @@ async def reset_daily_missions():
         logging.exception(f"[daily-mission-reset] failed: {e}")
 
 @tasks.loop(seconds=VOICE_COOLDOWN)
+@guard_background_task("voice_xp")
 async def voice_xp_task():
     """음성 채널 경험치 태스크."""
     if not await aseason_xp_enabled():
@@ -1989,6 +2012,7 @@ async def voice_xp_task_error(error):
         logging.exception(f"[voice_xp_task] restart failed: {e2}")
         
 @tasks.loop(seconds=60)
+@guard_background_task("repeat_vc_mission")
 async def repeat_vc_mission_task():
     """5인 이상 음성방 반복 미션을 유저 단위로 안전하게 누적합니다."""
     if not await aseason_xp_enabled():
@@ -2072,6 +2096,7 @@ async def repeat_vc_mission_task():
         logging.warning(f"[repeat_vc_mission] local backup failed: {e!r}")
 
 @tasks.loop(seconds=60)
+@guard_background_task("voice_count_channel")
 async def voice_count_channel_task():
     for guild in bot.guilds:
         try:
@@ -2100,6 +2125,7 @@ async def voice_count_channel_task():
             logging.exception(f"[voice-count] guild={guild.id} error: {e}")
 
 @tasks.loop(minutes=5)
+@guard_background_task("season_transition")
 async def season_transition_task():
     """
     시즌 시작 자동 처리 태스크.
@@ -3047,12 +3073,43 @@ async def _update_season_state(data: dict):
     await asyncio.to_thread(lambda: _season_state_ref().update(data))
 
 
+async def ensure_guild_member_cache_complete(guild: discord.Guild) -> tuple[bool, str]:
+    """첫 시즌 전환 전에 서버 멤버 캐시가 완전한지 확인합니다."""
+    if not bot.intents.members:
+        return False, "봇 코드의 Server Members Intent가 비활성화되어 있습니다."
+
+    expected = guild.member_count
+    cached = len(guild.members)
+    if guild.chunked and (expected is None or cached >= expected):
+        return True, ""
+
+    try:
+        await asyncio.wait_for(guild.chunk(cache=True), timeout=60)
+    except asyncio.TimeoutError:
+        return False, "서버원 목록 불러오기가 60초 안에 완료되지 않았습니다."
+    except discord.PrivilegedIntentsRequired:
+        return False, "Discord 개발자 포털에서 서버 멤버 인텐트를 활성화해야 합니다."
+    except Exception as e:
+        logging.exception("[first-season] guild member chunk failed")
+        return False, f"서버원 목록을 불러오지 못했습니다: {type(e).__name__}"
+
+    expected = guild.member_count
+    cached = len(guild.members)
+    if not guild.chunked:
+        return False, f"서버원 캐시가 완성되지 않았습니다. 캐시 {cached}명 / 서버 표시 {expected or '확인 불가'}명"
+    if expected is not None and cached < expected:
+        return False, f"서버원 캐시 인원이 부족합니다. 캐시 {cached}명 / 서버 표시 {expected}명"
+    return True, ""
+
+
 def first_season_preflight_errors(guild: discord.Guild) -> list[str]:
     """첫 시즌 전환 전에 Discord 권한과 공지 채널을 점검합니다."""
     errors: list[str] = []
     me = guild.me
     if me is None:
         return ["서버에서 봇 멤버 정보를 확인할 수 없습니다."]
+    if not bot.intents.members:
+        errors.append("봇 코드의 `서버 멤버 인텐트`가 비활성화되어 있습니다.")
 
     if not me.guild_permissions.manage_roles:
         errors.append("봇에 `역할 관리` 권한이 없습니다.")
@@ -3199,6 +3256,17 @@ async def send_standard_season_start_notice(
 
 
 async def process_season_start_if_needed(guild: discord.Guild) -> dict:
+    """같은 서버의 다른 시즌 작업과 겹치지 않게 자동 시즌 전환을 직렬화합니다."""
+    if not guild:
+        return {"processed": False, "reason": "no_guild"}
+    lock = get_season_operation_lock(guild.id)
+    if lock.locked():
+        return {"processed": False, "reason": "season_operation_busy"}
+    async with lock:
+        return await _process_season_start_if_needed_locked(guild)
+
+
+async def _process_season_start_if_needed_locked(guild: discord.Guild) -> dict:
     """준비된 다음 시즌을 열고, 실패한 시작 공지는 이후 루프에서 재시도합니다."""
     if not guild:
         return {"processed": False, "reason": "no_guild"}
@@ -3225,6 +3293,165 @@ async def process_season_start_if_needed(guild: discord.Guild) -> dict:
 
     current_id = state.get("current_season_id")
     calendar_id = cal.get("season_id")
+
+    # 현재 시즌 정산 후처리가 중간에 끊겼다면 닉네임과 공지를 복구합니다.
+    if current_id == calendar_id and state.get("settlement_postprocess_pending"):
+        pending_season_id = state.get("settlement_postprocess_season_id")
+        if pending_season_id == calendar_id:
+            cache_ok, cache_error = await ensure_guild_member_cache_complete(guild)
+            if not cache_ok:
+                logging.warning(f"[season-settlement] postprocess recovery delayed: {cache_error}")
+                return {"processed": False, "reason": "member_cache_incomplete", "error": cache_error}
+            nick_result = await reset_progress_title_members(guild, level=1)
+            notice_sent = state.get("settlement_notice_sent_for") == calendar_id
+            if not notice_sent:
+                notice = guild.get_channel(int(state.get("season_notice_channel_id") or SEASON_NOTICE_CHANNEL_ID))
+                if notice and hasattr(notice, "send"):
+                    try:
+                        await notice.send(
+                            f"📢 `{state.get('current_season_name', '현재 시즌')}` 시즌 정산이 완료되었습니다. "
+                            "프리시즌 동안 시즌 경험치 획득이 중단됩니다.",
+                            allowed_mentions=ALLOW_NO_PING,
+                        )
+                        notice_sent = True
+                    except Exception as e:
+                        logging.warning(f"[season-settlement] notice recovery failed: {e!r}")
+
+            await _update_season_state({
+                "settlement_postprocess_pending": False,
+                "settlement_postprocess_completed_at": datetime.now(KST).isoformat(),
+                "settlement_notice_sent_for": calendar_id if notice_sent else "",
+                "settlement_notice_pending": not notice_sent,
+            })
+            return {
+                "processed": True,
+                "reason": "settlement_postprocess_recovered",
+                "nick_updated": nick_result["updated"],
+                "nick_failed": nick_result["failed"],
+                "notice_sent": notice_sent,
+            }
+
+    # 정산 공지만 실패한 경우 후처리를 반복하지 않고 공지만 재전송합니다.
+    if current_id == calendar_id and state.get("settlement_notice_pending"):
+        notice = guild.get_channel(int(state.get("season_notice_channel_id") or SEASON_NOTICE_CHANNEL_ID))
+        if notice and hasattr(notice, "send"):
+            try:
+                await notice.send(
+                    f"📢 `{state.get('current_season_name', '현재 시즌')}` 시즌 정산이 완료되었습니다. "
+                    "프리시즌 동안 시즌 경험치 획득이 중단됩니다.",
+                    allowed_mentions=ALLOW_NO_PING,
+                )
+                await _update_season_state({
+                    "settlement_notice_pending": False,
+                    "settlement_notice_sent_for": calendar_id,
+                    "settlement_notice_sent_at": datetime.now(KST).isoformat(),
+                })
+                return {"processed": True, "reason": "settlement_notice_retried"}
+            except Exception as e:
+                logging.warning(f"[season-settlement] notice retry failed: {e!r}")
+
+    # 첫 시즌 DB 커밋 후 역할/닉네임 후처리가 중간에 끊겼다면 자동 복구합니다.
+    if current_id == calendar_id:
+        migration = await aget_legacy_migration_record(calendar_id)
+        if (
+            migration.get("type") == "first_season_start"
+            and migration.get("status") == "db_committed"
+        ):
+            cache_ok, cache_error = await ensure_guild_member_cache_complete(guild)
+            if not cache_ok:
+                logging.warning(f"[first-season] postprocess recovery delayed: {cache_error}")
+                return {"processed": False, "reason": "member_cache_incomplete", "error": cache_error}
+
+            role_removed_count = role_failed_count = 0
+            nick_updated_count = nick_failed_count = 0
+            for member in guild.members:
+                if member.bot:
+                    continue
+                removed, failed = await remove_legacy_level_roles(member)
+                role_removed_count += removed
+                role_failed_count += failed
+                if member.id != guild.owner_id:
+                    if await apply_member_title(member, 1):
+                        nick_updated_count += 1
+                    else:
+                        nick_failed_count += 1
+                await asyncio.sleep(0.15)
+
+            await _update_season_state({
+                "season_start_postprocess_pending_for": "",
+                "season_start_postprocess_completed_at": datetime.now(KST).isoformat(),
+            })
+
+            reward = await _get_season_reward(calendar_id)
+            channel_id = int(state.get("season_notice_channel_id") or SEASON_NOTICE_CHANNEL_ID)
+            notice_sent = state.get("start_notice_sent_for") == calendar_id
+            notice_error = ""
+            if not notice_sent:
+                notice_sent, notice_error = await send_season_start_embed(
+                    guild,
+                    embed=build_first_season_start_embed(
+                        state.get("current_season_name") or migration.get("season_name") or "첫 시즌",
+                        cal,
+                        reward,
+                        str(migration.get("notice_extra", "")),
+                    ),
+                    channel_id=channel_id,
+                )
+                if notice_sent:
+                    await _update_season_state({
+                        "start_notice_sent_for": calendar_id,
+                        "season_start_notice_pending_for": "",
+                        "season_start_notice_sent_at": datetime.now(KST).isoformat(),
+                        "season_start_notice_last_error": "",
+                    })
+                else:
+                    await _update_season_state({"season_start_notice_last_error": notice_error})
+
+            final_status = "completed" if notice_sent else "completed_notice_failed"
+            await aupdate_legacy_migration_record(calendar_id, {
+                "status": final_status,
+                "phase": "completed",
+                "resumed_at": datetime.now(KST).isoformat(),
+                "notice_error": notice_error,
+                "result": {
+                    "legacy_title_count": _safe_int(
+                        (migration.get("result") or {}).get("legacy_title_target_count"), 0
+                    ),
+                    "exp_reset_count": _safe_int(
+                        (migration.get("result") or {}).get("exp_reset_target_count"), 0
+                    ),
+                    "role_removed_count": role_removed_count,
+                    "role_failed_count": role_failed_count,
+                    "nick_updated_count": nick_updated_count,
+                    "nick_failed_count": nick_failed_count,
+                    "notice_sent": notice_sent,
+                },
+            })
+            return {
+                "processed": True,
+                "reason": "first_season_postprocess_recovered",
+                "notice_sent": notice_sent,
+            }
+
+    # 일반 시즌 개방 후 닉네임 후처리가 중간에 끊겼다면 자동 복구합니다.
+    if (
+        current_id == calendar_id
+        and state.get("season_start_postprocess_pending_for") == calendar_id
+    ):
+        cache_ok, cache_error = await ensure_guild_member_cache_complete(guild)
+        if not cache_ok:
+            logging.warning(f"[season-start] nickname recovery delayed: {cache_error}")
+            return {"processed": False, "reason": "member_cache_incomplete", "error": cache_error}
+        nick_result = await reset_progress_title_members(guild, level=1)
+        await _update_season_state({
+            "season_start_postprocess_pending_for": "",
+            "season_start_postprocess_completed_at": datetime.now(KST).isoformat(),
+        })
+        state["season_start_postprocess_pending_for"] = ""
+        logging.info(
+            "[season-start] recovered nickname postprocess season=%s updated=%s failed=%s",
+            calendar_id, nick_result["updated"], nick_result["failed"],
+        )
 
     # 이미 시즌 데이터는 열렸지만 공지만 실패한 경우 재전송합니다.
     if current_id == calendar_id:
@@ -3301,6 +3528,14 @@ async def process_season_start_if_needed(guild: discord.Guild) -> dict:
         await _update_season_state({"status": SEASON_STATUS_LOCKED})
         return {"processed": False, "reason": "notice_permission_missing"}
 
+    cache_ok, cache_error = await ensure_guild_member_cache_complete(guild)
+    if not cache_ok:
+        await _update_season_state({
+            "status": SEASON_STATUS_LOCKED,
+            "season_start_last_error": cache_error,
+        })
+        return {"processed": False, "reason": "member_cache_incomplete", "error": cache_error}
+
     season_name = state.get("next_season_name") or DEFAULT_SEASON_NAMES.get(cal["season_type"], "새 시즌")
     now_iso = datetime.now(KST).isoformat()
     await _update_season_state({
@@ -3315,11 +3550,16 @@ async def process_season_start_if_needed(guild: discord.Guild) -> dict:
         "next_season_name": "",
         "started_at": now_iso,
         "season_start_processed_at": now_iso,
+        "season_start_postprocess_pending_for": calendar_id,
         "season_start_notice_pending_for": calendar_id,
         "season_start_notice_last_error": "",
     })
 
     nick_result = await reset_progress_title_members(guild, level=1)
+    await _update_season_state({
+        "season_start_postprocess_pending_for": "",
+        "season_start_postprocess_completed_at": datetime.now(KST).isoformat(),
+    })
     success, error = await send_standard_season_start_notice(
         guild,
         season_name=season_name,
@@ -3363,6 +3603,7 @@ async def process_season_start_if_needed(guild: discord.Guild) -> dict:
 @app_commands.guild_only()
 @bot.tree.command(name="첫시즌시작", description="기존 레벨을 칭호로 보존하고 첫 시즌패스를 시작합니다.")
 @app_commands.describe(시즌이름="첫 시즌 이름", 공지내용="시즌 시작 공지에 추가로 적을 내용(선택)")
+@season_operation_serialized()
 async def first_season_start(
     interaction: discord.Interaction,
     시즌이름: str,
@@ -3426,11 +3667,28 @@ async def first_season_start(
             ephemeral=True,
         )
 
-    if not interaction.guild.chunked:
+    cache_ok, cache_error = await ensure_guild_member_cache_complete(interaction.guild)
+    if not cache_ok:
         try:
-            await interaction.guild.chunk(cache=True)
-        except Exception as e:
-            logging.warning(f"[first-season] guild chunk failed: {e!r}")
+            await aset_legacy_migration_record(season_id, {
+                "type": "first_season_start",
+                "status": "failed_preflight",
+                "phase": "member_cache",
+                "season_id": season_id,
+                "season_name": 시즌이름,
+                "executed_by": str(interaction.user.id),
+                "executed_by_name": interaction.user.display_name,
+                "executed_at": datetime.now(KST).isoformat(),
+                "errors": [cache_error],
+            })
+        except Exception:
+            pass
+        return await interaction.followup.send(
+            "❌ 첫 시즌 시작을 중단했습니다. 서버원 목록이 완전히 로드되지 않았습니다.\n"
+            f"사유: {cache_error}\n"
+            "Discord 개발자 포털의 `서버 멤버 인텐트`와 봇의 서버 재접속 상태를 확인해주세요.",
+            ephemeral=True,
+        )
 
     exp_data = await aload_exp_data()
     if not isinstance(exp_data, dict):
@@ -3530,6 +3788,7 @@ async def first_season_start(
         "next_season_name": "",
         "started_at": now_iso,
         "start_notice_sent_for": "",
+        "season_start_postprocess_pending_for": season_id,
         "season_start_notice_pending_for": season_id,
         "season_start_notice_last_error": "",
         "season_start_processed_at": now_iso,
@@ -3602,6 +3861,11 @@ async def first_season_start(
             else:
                 nick_failed_count += 1
         await asyncio.sleep(0.15)
+
+    await _update_season_state({
+        "season_start_postprocess_pending_for": "",
+        "season_start_postprocess_completed_at": datetime.now(KST).isoformat(),
+    })
 
     notice_sent, notice_error = await send_season_start_embed(
         interaction.guild,
@@ -3799,6 +4063,7 @@ async def season_info(interaction: discord.Interaction):
 @app_commands.guild_only()
 @bot.tree.command(name="시즌보상설정", description="현재 또는 다음 시즌 Lv.100 보상 칭호를 설정합니다.")
 @app_commands.describe(칭호명="Lv.100 달성자에게 지급할 칭호", 설명="보상 설명")
+@season_operation_serialized()
 async def season_reward_set(interaction: discord.Interaction, 칭호명: str, 설명: str = ""):
     칭호명 = (칭호명 or "").strip()
     설명 = (설명 or "").strip()
@@ -3884,6 +4149,7 @@ async def season_reward_set(interaction: discord.Interaction, 칭호명: str, �
 @app_commands.guild_only()
 @bot.tree.command(name="다음시즌준비", description="다음 시즌에 사용할 시즌 이름을 지정합니다.")
 @app_commands.describe(시즌이름="다음 시즌 이름")
+@season_operation_serialized()
 async def next_season_prepare(interaction: discord.Interaction, 시즌이름: str):
     state = await aget_effective_season_state()
 
@@ -3937,6 +4203,7 @@ async def next_season_prepare(interaction: discord.Interaction, 시즌이름: st
 @app_commands.checks.has_permissions(administrator=True)
 @app_commands.guild_only()
 @bot.tree.command(name="현재시즌초기화", description="현재 시즌을 정산하고 경험치/레벨을 초기화합니다.")
+@season_operation_serialized()
 async def current_season_reset(interaction: discord.Interaction):
     if not interaction.guild:
         return await interaction.response.send_message("DM에서는 사용할 수 없습니다.", ephemeral=True)
@@ -3965,6 +4232,14 @@ async def current_season_reset(interaction: discord.Interaction):
     if not reward.get("title_name"):
         return await interaction.followup.send(
             "❌ 현재 시즌 Lv.100 보상 칭호가 설정되어 있지 않습니다.",
+            ephemeral=True,
+        )
+
+    cache_ok, cache_error = await ensure_guild_member_cache_complete(interaction.guild)
+    if not cache_ok:
+        return await interaction.followup.send(
+            "❌ 시즌 정산을 중단했습니다. 서버원 목록이 완전히 로드되지 않았습니다.\n"
+            f"사유: {cache_error}",
             ephemeral=True,
         )
 
@@ -4029,6 +4304,11 @@ async def current_season_reset(interaction: discord.Interaction):
         "season_state/next_ready": False,
         "season_state/settled_by": str(interaction.user.id),
         "season_state/settled_at": now_iso,
+        "season_state/settlement_postprocess_pending": True,
+        "season_state/settlement_postprocess_season_id": season_id,
+        "season_state/settlement_notice_sent_for": "",
+        "season_state/settlement_notice_pending": True,
+        "season_state/settlement_log_sent_for": "",
     }
     try:
         await afirebase_root_update_strict(settlement_updates)
@@ -4086,22 +4366,34 @@ async def current_season_reset(interaction: discord.Interaction):
     )
     embed.set_footer(text=f"정산자: {interaction.user.display_name} · {datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')}")
 
+    log_sent = False
     log_channel = interaction.guild.get_channel(LOG_CHANNEL_ID)
-    if log_channel:
+    if log_channel and hasattr(log_channel, "send"):
         try:
             await log_channel.send(embed=embed, allowed_mentions=ALLOW_NO_PING)
+            log_sent = True
         except Exception:
             pass
 
+    notice_sent = False
     notice = interaction.guild.get_channel(SEASON_NOTICE_CHANNEL_ID)
-    if notice:
+    if notice and hasattr(notice, "send"):
         try:
             await notice.send(
                 f"📢 `{state.get('current_season_name')}` 시즌 정산이 완료되었습니다. 프리시즌 동안 시즌 경험치 획득이 중단됩니다.",
                 allowed_mentions=ALLOW_NO_PING,
             )
+            notice_sent = True
         except Exception:
             pass
+
+    await _update_season_state({
+        "settlement_postprocess_pending": False,
+        "settlement_postprocess_completed_at": datetime.now(KST).isoformat(),
+        "settlement_notice_sent_for": season_id if notice_sent else "",
+        "settlement_notice_pending": not notice_sent,
+        "settlement_log_sent_for": season_id if log_sent else "",
+    })
 
     await interaction.followup.send(embed=embed, ephemeral=True)
 
@@ -4122,6 +4414,13 @@ class TitleSelect(discord.ui.Select):
     async def callback(self, interaction: discord.Interaction):
         if interaction.user.id != self.owner_id:
             return await interaction.response.send_message("이 메뉴는 명령어를 실행한 본인만 사용할 수 있습니다.", ephemeral=True)
+
+        state = await aget_effective_season_state()
+        if not state.get("first_season_started"):
+            return await interaction.response.edit_message(
+                content="❌ 현재는 시즌패스 준비 중이라 칭호를 변경할 수 없습니다.",
+                view=None,
+            )
 
         selected = self.values[0]
         uid = str(interaction.user.id)
@@ -4171,10 +4470,16 @@ class TitleManageView(discord.ui.View):
 @bot.tree.command(name="칭호관리", description="보유한 칭호를 확인하고 착용합니다.")
 async def title_manage(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
+    state = await aget_effective_season_state()
+    if not state.get("first_season_started"):
+        return await interaction.followup.send(
+            "현재는 시즌패스 준비 중이라 칭호를 변경할 수 없습니다. 첫 시즌 시작 후 이용해주세요.",
+            ephemeral=True,
+        )
+
     uid = str(interaction.user.id)
     user_data = await aget_user_exp(uid)
     level = calculate_level(user_data.get("exp", 0))
-    state = await aget_effective_season_state()
     titles = await aget_user_titles(uid)
     owned = titles.get("owned", {})
 
@@ -4347,129 +4652,29 @@ async def disconnect_voice(
 # ---- 실행 및 웹 서버 유지 ----
 from aiohttp import web
 
-# =========================
-# Runtime / Discord diagnostics
-# =========================
-_LOGIN_DIAG = {
-    "phase": "booting",
-    "last_error": "",
-    "last_http_status": None,
-    "retry_count": 0,
-    "next_retry_at": "",
-    "last_attempt_at": "",
-    "last_login_at": "",
-}
-
-
-def _diag_set(**kwargs):
-    _LOGIN_DIAG.update(kwargs)
-
-
-def _interaction_endpoint_url():
-    try:
-        app_info = getattr(bot, "application", None)
-        value = getattr(app_info, "interactions_endpoint_url", None) if app_info else None
-        return str(value) if value else None
-    except Exception:
-        return None
-
-
-def _http_retry_after_seconds(exc: Exception) -> float | None:
-    """Discord/Cloudflare HTTP 예외에서 Retry-After 값을 안전하게 읽습니다."""
-    try:
-        response = getattr(exc, "response", None)
-        headers = getattr(response, "headers", None)
-        if headers:
-            raw = headers.get("Retry-After")
-            if raw is not None:
-                value = float(raw)
-                if value >= 0:
-                    return value
-    except Exception:
-        pass
-
-    try:
-        value = float(getattr(exc, "retry_after"))
-        if value >= 0:
-            return value
-    except Exception:
-        pass
-    return None
-
-
+# ---- 실행 및 웹 서버 유지 (aiohttp, same event loop) ----
 async def health(_request):
-    """UptimeRobot/Render용 생존 확인. 기존 루트 응답은 유지합니다."""
-    return web.Response(text="Bot is running!")
+    """프로세스와 웹 서버 생존 여부를 반환합니다."""
+    return web.json_response({
+        "process": "ok",
+        "discord_ready": bool(bot.is_ready()),
+        "guild_count": len(bot.guilds),
+    })
 
 
 async def readiness(_request):
-    """
-    현재 Render 프로세스가 실제 Discord Gateway까지 준비됐는지 확인합니다.
-    HTTP 200: Discord ready
-    HTTP 503: 웹 프로세스만 살아 있고 Discord는 준비되지 않음
-    """
+    """Discord 로그인까지 완료됐는지 확인하는 준비 상태 엔드포인트입니다."""
     ready = bool(bot.is_ready())
-    endpoint_url = _interaction_endpoint_url()
-    payload = {
-        "ready": ready,
-        "discord_user": str(bot.user) if bot.user else None,
-        "guild_count": len(bot.guilds),
-        "latency_ms": (
-            round(bot.latency * 1000, 1)
-            if ready and isinstance(getattr(bot, "latency", None), (int, float))
-            else None
-        ),
-        "interaction_delivery": (
-            "HTTP webhook endpoint configured - Gateway slash commands disabled"
-            if endpoint_url
-            else "Gateway"
-        ),
-        "interactions_endpoint_url": endpoint_url,
-        **_LOGIN_DIAG,
-    }
-    return web.json_response(payload, status=200 if ready else 503)
-
-
-async def discord_check(_request):
-    """
-    Render 서버에서 Discord 공개 API까지 네트워크 연결이 되는지 확인합니다.
-    봇 토큰은 사용하지 않으므로 이 진단 요청 자체가 봇 로그인 제한을 추가로 만들지 않습니다.
-    """
-    started = time.monotonic()
-    try:
-        timeout = aiohttp.ClientTimeout(total=10)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(
-                "https://discord.com/api/v10/gateway",
-                headers={"User-Agent": "DiscordBot-Diagnostic/1.0"},
-            ) as response:
-                body = await response.text()
-                return web.json_response({
-                    "ok": response.status == 200,
-                    "status": response.status,
-                    "elapsed_ms": round((time.monotonic() - started) * 1000, 1),
-                    "body_preview": body[:300],
-                    "bot_ready": bool(bot.is_ready()),
-                    "discord_user": str(bot.user) if bot.user else None,
-                    "interactions_endpoint_url": _interaction_endpoint_url(),
-                })
-    except asyncio.TimeoutError:
-        return web.json_response({
-            "ok": False,
-            "error": "timeout",
-            "elapsed_ms": round((time.monotonic() - started) * 1000, 1),
-        }, status=504)
-    except Exception as exc:
-        return web.json_response({
-            "ok": False,
-            "error": type(exc).__name__,
-            "detail": str(exc)[:300],
-            "elapsed_ms": round((time.monotonic() - started) * 1000, 1),
-        }, status=502)
-
+    return web.json_response(
+        {
+            "ready": ready,
+            "discord_user": str(bot.user) if bot.user else None,
+            "guild_count": len(bot.guilds),
+        },
+        status=200 if ready else 503,
+    )
 
 _web_runner = None
-
 
 async def start_web_app():
     global _web_runner
@@ -4477,7 +4682,6 @@ async def start_web_app():
         app = web.Application()
         app.router.add_get("/", health)
         app.router.add_get("/ready", readiness)
-        app.router.add_get("/discord-check", discord_check)
 
         _web_runner = web.AppRunner(app)
         await _web_runner.setup()
@@ -4489,186 +4693,71 @@ async def start_web_app():
         logging.info(f"[web] listening on 0.0.0.0:{port}")
     except Exception as e:
         logging.exception(f"[web] failed to start: {e}")
-        # 웹이 죽어도 Discord 연결 시도는 계속합니다.
+        # 웹이 죽어도 봇은 계속 켠다
 
-
-async def _reset_discord_http_after_failed_login():
-    """
-    로그인 실패 뒤 discord.py HTTP 세션을 새 연결로 재생성할 수 있게 정리합니다.
-
-    기존 코드의 bot.close() -> bot.clear() 조합은 aiohttp connector까지 닫은 뒤
-    같은 connector를 다음 로그인에서 재사용할 수 있어 'Session is closed'가 발생할 수 있습니다.
-    여기서는 Gateway client 전체를 close하지 않고 HTTP 세션만 정리한 뒤
-    다음 static_login()이 새 connector를 만들도록 connector를 MISSING으로 되돌립니다.
-    """
+async def _reset_bot_client_state():
+    """연결 실패 후 동일 Bot 인스턴스를 다시 사용할 수 있게 초기화합니다."""
     try:
-        await bot.http.close()
-    except Exception as exc:
-        logging.warning("[login] HTTP session close failed: %r", exc)
-
+        await bot.close()
+    except Exception:
+        pass
     try:
-        bot.http.clear()
-    except Exception as exc:
-        logging.warning("[login] HTTP clear failed: %r", exc)
-
-    # discord.py 2.x HTTPClient.static_login()은 connector가 MISSING일 때
-    # 새 aiohttp.TCPConnector를 생성합니다.
-    try:
-        bot.http.connector = discord.utils.MISSING
-    except Exception as exc:
-        logging.warning("[login] connector reset failed: %r", exc)
+        bot.clear()
+    except Exception:
+        pass
 
 
 async def _safe_start():
     """
-    Discord 로그인과 Gateway 연결을 분리해 운영합니다.
-
-    - 최초 REST 로그인 실패(특히 Cloudflare 429)는 자체 백오프로 재시도
-    - 실패 시 닫힌 connector를 재사용하지 않도록 HTTP 상태를 재생성
-    - 로그인 성공 후 Gateway 재연결은 discord.py의 connect(reconnect=True)에 맡김
-    - 잘못된 토큰은 빠르게 반복 호출하지 않음
+    디스코드 로그인 안전 실행:
+    - 로그인/연결 전에 발생하는 예외만 백오프 재시도
+    - 실행 후에는 timeout으로 세션을 끊지 않음 (중요)
     """
-    cloudflare_penalty = 0
+    base = 1800          # 30분
+    max_backoff = 7200   # 2시간
+    penalty = 0          # 연속 429 누적
 
     while True:
-        now_iso = datetime.now(KST).isoformat()
-        _diag_set(
-            phase="logging_in",
-            last_attempt_at=now_iso,
-            next_retry_at="",
-        )
-        logging.info("[login] Discord REST login attempt #%s", _LOGIN_DIAG["retry_count"] + 1)
-
         try:
-            # 로그인 REST 요청이 무기한 걸리지 않게 상한을 둡니다.
-            await asyncio.wait_for(bot.login(TOKEN), timeout=45)
-
-            endpoint_url = _interaction_endpoint_url()
-            _diag_set(
-                phase="gateway_connecting",
-                last_error="",
-                last_http_status=None,
-                next_retry_at="",
-                last_login_at=datetime.now(KST).isoformat(),
-            )
-            cloudflare_penalty = 0
-
-            if endpoint_url:
-                logging.error(
-                    "[login] CRITICAL: Discord application has Interactions Endpoint URL=%s. "
-                    "Slash commands will not arrive through Gateway until it is removed in Developer Portal.",
-                    endpoint_url,
-                )
-            else:
-                logging.info("[login] REST login successful; connecting Gateway")
-
-            # 이 시점부터 일시적인 WebSocket 단절/재연결은 discord.py가 직접 관리합니다.
-            try:
-                await bot.connect(reconnect=True)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                _diag_set(
-                    phase="gateway_failed",
-                    last_error=f"{type(exc).__name__}: {str(exc)[:500]}",
-                )
-                logging.exception("[gateway] fatal connection error")
-                raise
-
-            # 정상 운영 중 connect()가 반환되는 것은 일반적인 상황이 아닙니다.
-            raise RuntimeError("Discord Gateway connect() returned unexpectedly")
-
-        except discord.LoginFailure as exc:
-            _diag_set(
-                phase="login_failed",
-                last_error=f"LoginFailure: {str(exc)[:500]}",
-                last_http_status=401,
-                retry_count=_LOGIN_DIAG["retry_count"] + 1,
-            )
-            logging.error("[login] invalid Discord token: %s", exc)
-            await _reset_discord_http_after_failed_login()
-            wait = 3600
-
-        except discord.PrivilegedIntentsRequired as exc:
-            _diag_set(
-                phase="privileged_intents_required",
-                last_error=f"PrivilegedIntentsRequired: {str(exc)[:500]}",
-                retry_count=_LOGIN_DIAG["retry_count"] + 1,
-            )
-            logging.error("[login] privileged intents are not enabled: %s", exc)
-            await _reset_discord_http_after_failed_login()
-            wait = 3600
-
-        except discord.HTTPException as exc:
-            status = getattr(exc, "status", None)
-            retry_after = _http_retry_after_seconds(exc)
-            _diag_set(
-                phase="rate_limited" if status == 429 else "http_error",
-                last_error=f"{type(exc).__name__}: {str(exc)[:500]}",
-                last_http_status=status,
-                retry_count=_LOGIN_DIAG["retry_count"] + 1,
-            )
-            await _reset_discord_http_after_failed_login()
+            print("[login] bot.start 진입")
+            # ❌ timeout 제거: 실행 중에는 세션을 끊지 않는다
+            await bot.start(TOKEN)
+            print("[login] bot.start returned unexpectedly. restarting soon.")
+            await _reset_bot_client_state()
+            await asyncio.sleep(10)
+            continue
+            
+        except discord.HTTPException as e:
+            # 로그인/연결 직전 단계의 HTTP 오류만 백오프
+            status = getattr(e, "status", None)
+            await _reset_bot_client_state()
 
             if status == 429:
-                cloudflare_penalty = min(cloudflare_penalty + 1, 4)
-                if retry_after is not None:
-                    # 서버가 준 값을 우선하되 너무 짧은 즉시 재시도는 피합니다.
-                    wait = max(60, int(retry_after) + 5)
-                else:
-                    # Cloudflare형 429는 Retry-After가 없을 수 있으므로 보수적으로 대기합니다.
-                    wait = min(1800 * cloudflare_penalty, 7200)
-                wait = int(wait * random.uniform(0.95, 1.05))
-                logging.warning(
-                    "[login] Discord/Cloudflare 429. retry_after=%s; backoff=%ss",
-                    retry_after,
-                    wait,
-                )
-            else:
-                wait = int(300 * random.uniform(0.9, 1.1))
-                logging.warning("[login] HTTP %s; retry in %ss: %r", status, wait, exc)
+                penalty = min(penalty + 1, 3)                       # 1→2→3
+                wait = min(base + penalty * 1800, max_backoff)       # 60→90→120분
+                wait = int(wait * random.uniform(0.95, 1.1))
+                print(f"[login] 429/Cloudflare rate limit. backoff {wait}s")
+                await asyncio.sleep(wait)
+                continue
 
-        except asyncio.TimeoutError:
-            _diag_set(
-                phase="login_timeout",
-                last_error="Discord REST login timed out after 45 seconds",
-                last_http_status=None,
-                retry_count=_LOGIN_DIAG["retry_count"] + 1,
-            )
-            logging.error("[login] Discord REST login timeout (45s)")
-            await _reset_discord_http_after_failed_login()
-            wait = 120
+            wait = int(min(base, max_backoff) * random.uniform(0.5, 1.0))
+            print(f"[login] HTTP {status}; backoff {wait}s: {e!r}")
+            await asyncio.sleep(wait)
 
-        except RuntimeError as exc:
-            # 특히 과거에 발생했던 'Session is closed'도 여기서 새 HTTP 연결로 복구합니다.
-            _diag_set(
-                phase="runtime_error",
-                last_error=f"RuntimeError: {str(exc)[:500]}",
-                retry_count=_LOGIN_DIAG["retry_count"] + 1,
-            )
-            logging.exception("[login] RuntimeError")
-            await _reset_discord_http_after_failed_login()
-            wait = 90
+        except RuntimeError as e:
+            # 드문 런타임 오류에 대해 보수적 백오프 후 재시도
+            await _reset_bot_client_state()
+            wait = int(900 * random.uniform(0.8, 1.2))
+            print(f"[login] RuntimeError; backoff {wait}s: {e!r}")
+            await asyncio.sleep(wait)
 
-        except asyncio.CancelledError:
-            raise
+        except Exception as e:
+            # 알 수 없는 예외
+            await _reset_bot_client_state()
+            wait = int(900 * random.uniform(0.8, 1.2))
+            print(f"[login] unexpected; backoff {wait}s: {e!r}")
+            await asyncio.sleep(wait)
 
-        except Exception as exc:
-            _diag_set(
-                phase="unexpected_error",
-                last_error=f"{type(exc).__name__}: {str(exc)[:500]}",
-                retry_count=_LOGIN_DIAG["retry_count"] + 1,
-            )
-            logging.exception("[login] unexpected login error")
-            await _reset_discord_http_after_failed_login()
-            wait = 180
-
-        retry_at = datetime.now(KST) + timedelta(seconds=wait)
-        _diag_set(
-            next_retry_at=retry_at.isoformat(),
-        )
-        logging.info("[login] next retry at %s (KST)", retry_at.strftime("%Y-%m-%d %H:%M:%S"))
-        await asyncio.sleep(wait)
 
 
 # --- 강제 로깅 활성화 (INFO 이상 콘솔 출력)
@@ -4685,12 +4774,12 @@ logging.getLogger("discord.client").setLevel(logging.INFO)
 logging.getLogger("discord.gateway").setLevel(logging.INFO)
 logging.getLogger("discord.http").setLevel(logging.INFO)
 
-
+# 프로그램 시작 시: 포트를 먼저 바인딩하고, 그 다음 디스코드 봇을 시작
 async def _main():
-    # Render 포트부터 바인딩한 뒤 Discord 로그인/게이트웨이를 시작합니다.
+    # 포트 바인딩(웹 서버) 먼저 시작 → Render의 포트 스캔 통과
     await start_web_app()
+    # 이후 디스코드 로그인 루프 진입
     await _safe_start()
-
 
 if __name__ == "__main__":
     asyncio.run(_main())
