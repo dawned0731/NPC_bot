@@ -1719,6 +1719,26 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
         pass
 
 
+@bot.listen("on_interaction")
+async def _interaction_debug_listener(interaction: discord.Interaction):
+    """슬래시 명령어 Interaction이 현재 프로세스까지 도착하는지 로그로 확인합니다."""
+    try:
+        if interaction.type == discord.InteractionType.application_command:
+            command_name = None
+            data = getattr(interaction, "data", None)
+            if isinstance(data, dict):
+                command_name = data.get("name")
+            logging.info(
+                "[interaction] received command=%s user=%s guild=%s interaction_id=%s",
+                command_name or "unknown",
+                getattr(interaction.user, "id", None),
+                getattr(interaction.guild, "id", None),
+                getattr(interaction, "id", None),
+            )
+    except Exception:
+        logging.exception("[interaction] diagnostic listener failed")
+
+
 # ---- on_ready ----
 @bot.event
 async def on_ready():
@@ -1732,6 +1752,23 @@ async def on_ready():
 
     print(f"✅ {bot.user} 온라인")
     logging.info(f"[ready] logged in as {bot.user} (id={bot.user.id})")
+
+    # Discord Developer Portal에 Interactions Endpoint URL이 설정돼 있으면
+    # Gateway 방식의 슬래시 명령어가 이 봇 프로세스로 전달되지 않습니다.
+    try:
+        app_info = getattr(bot, "application", None)
+        endpoint_url = getattr(app_info, "interactions_endpoint_url", None) if app_info else None
+        if endpoint_url:
+            logging.error(
+                "[ready] CRITICAL: Interactions Endpoint URL is configured: %s -- "
+                "Gateway app commands will NOT be delivered to this bot.",
+                endpoint_url,
+            )
+        else:
+            logging.info("[ready] Interactions Endpoint URL: not configured (Gateway command delivery OK)")
+    except Exception:
+        logging.exception("[ready] failed to inspect Interactions Endpoint URL")
+
     await bot.change_presence(activity=discord.Game("제가 오프라인이라면, 서버장에게 말해주세요!"))
     
     # 3) 슬래시 커맨드 동기화: 최초 1회만
@@ -4310,17 +4347,137 @@ async def disconnect_voice(
 # ---- 실행 및 웹 서버 유지 ----
 from aiohttp import web
 
-# ---- 실행 및 웹 서버 유지 (aiohttp, same event loop) ----
+# =========================
+# Runtime / Discord diagnostics
+# =========================
+_LOGIN_DIAG = {
+    "phase": "booting",
+    "last_error": "",
+    "last_http_status": None,
+    "retry_count": 0,
+    "next_retry_at": "",
+    "last_attempt_at": "",
+    "last_login_at": "",
+}
+
+
+def _diag_set(**kwargs):
+    _LOGIN_DIAG.update(kwargs)
+
+
+def _interaction_endpoint_url():
+    try:
+        app_info = getattr(bot, "application", None)
+        value = getattr(app_info, "interactions_endpoint_url", None) if app_info else None
+        return str(value) if value else None
+    except Exception:
+        return None
+
+
+def _http_retry_after_seconds(exc: Exception) -> float | None:
+    """Discord/Cloudflare HTTP 예외에서 Retry-After 값을 안전하게 읽습니다."""
+    try:
+        response = getattr(exc, "response", None)
+        headers = getattr(response, "headers", None)
+        if headers:
+            raw = headers.get("Retry-After")
+            if raw is not None:
+                value = float(raw)
+                if value >= 0:
+                    return value
+    except Exception:
+        pass
+
+    try:
+        value = float(getattr(exc, "retry_after"))
+        if value >= 0:
+            return value
+    except Exception:
+        pass
+    return None
+
+
 async def health(_request):
+    """UptimeRobot/Render용 생존 확인. 기존 루트 응답은 유지합니다."""
     return web.Response(text="Bot is running!")
 
+
+async def readiness(_request):
+    """
+    현재 Render 프로세스가 실제 Discord Gateway까지 준비됐는지 확인합니다.
+    HTTP 200: Discord ready
+    HTTP 503: 웹 프로세스만 살아 있고 Discord는 준비되지 않음
+    """
+    ready = bool(bot.is_ready())
+    endpoint_url = _interaction_endpoint_url()
+    payload = {
+        "ready": ready,
+        "discord_user": str(bot.user) if bot.user else None,
+        "guild_count": len(bot.guilds),
+        "latency_ms": (
+            round(bot.latency * 1000, 1)
+            if ready and isinstance(getattr(bot, "latency", None), (int, float))
+            else None
+        ),
+        "interaction_delivery": (
+            "HTTP webhook endpoint configured - Gateway slash commands disabled"
+            if endpoint_url
+            else "Gateway"
+        ),
+        "interactions_endpoint_url": endpoint_url,
+        **_LOGIN_DIAG,
+    }
+    return web.json_response(payload, status=200 if ready else 503)
+
+
+async def discord_check(_request):
+    """
+    Render 서버에서 Discord 공개 API까지 네트워크 연결이 되는지 확인합니다.
+    봇 토큰은 사용하지 않으므로 이 진단 요청 자체가 봇 로그인 제한을 추가로 만들지 않습니다.
+    """
+    started = time.monotonic()
+    try:
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(
+                "https://discord.com/api/v10/gateway",
+                headers={"User-Agent": "DiscordBot-Diagnostic/1.0"},
+            ) as response:
+                body = await response.text()
+                return web.json_response({
+                    "ok": response.status == 200,
+                    "status": response.status,
+                    "elapsed_ms": round((time.monotonic() - started) * 1000, 1),
+                    "body_preview": body[:300],
+                    "bot_ready": bool(bot.is_ready()),
+                    "discord_user": str(bot.user) if bot.user else None,
+                    "interactions_endpoint_url": _interaction_endpoint_url(),
+                })
+    except asyncio.TimeoutError:
+        return web.json_response({
+            "ok": False,
+            "error": "timeout",
+            "elapsed_ms": round((time.monotonic() - started) * 1000, 1),
+        }, status=504)
+    except Exception as exc:
+        return web.json_response({
+            "ok": False,
+            "error": type(exc).__name__,
+            "detail": str(exc)[:300],
+            "elapsed_ms": round((time.monotonic() - started) * 1000, 1),
+        }, status=502)
+
+
 _web_runner = None
+
 
 async def start_web_app():
     global _web_runner
     try:
         app = web.Application()
         app.router.add_get("/", health)
+        app.router.add_get("/ready", readiness)
+        app.router.add_get("/discord-check", discord_check)
 
         _web_runner = web.AppRunner(app)
         await _web_runner.setup()
@@ -4332,71 +4489,186 @@ async def start_web_app():
         logging.info(f"[web] listening on 0.0.0.0:{port}")
     except Exception as e:
         logging.exception(f"[web] failed to start: {e}")
-        # 웹이 죽어도 봇은 계속 켠다
+        # 웹이 죽어도 Discord 연결 시도는 계속합니다.
 
-async def _reset_bot_client_state():
-    """연결 실패 후 동일 Bot 인스턴스를 다시 사용할 수 있게 초기화합니다."""
+
+async def _reset_discord_http_after_failed_login():
+    """
+    로그인 실패 뒤 discord.py HTTP 세션을 새 연결로 재생성할 수 있게 정리합니다.
+
+    기존 코드의 bot.close() -> bot.clear() 조합은 aiohttp connector까지 닫은 뒤
+    같은 connector를 다음 로그인에서 재사용할 수 있어 'Session is closed'가 발생할 수 있습니다.
+    여기서는 Gateway client 전체를 close하지 않고 HTTP 세션만 정리한 뒤
+    다음 static_login()이 새 connector를 만들도록 connector를 MISSING으로 되돌립니다.
+    """
     try:
-        await bot.close()
-    except Exception:
-        pass
+        await bot.http.close()
+    except Exception as exc:
+        logging.warning("[login] HTTP session close failed: %r", exc)
+
     try:
-        bot.clear()
-    except Exception:
-        pass
+        bot.http.clear()
+    except Exception as exc:
+        logging.warning("[login] HTTP clear failed: %r", exc)
+
+    # discord.py 2.x HTTPClient.static_login()은 connector가 MISSING일 때
+    # 새 aiohttp.TCPConnector를 생성합니다.
+    try:
+        bot.http.connector = discord.utils.MISSING
+    except Exception as exc:
+        logging.warning("[login] connector reset failed: %r", exc)
 
 
 async def _safe_start():
     """
-    디스코드 로그인 안전 실행:
-    - 로그인/연결 전에 발생하는 예외만 백오프 재시도
-    - 실행 후에는 timeout으로 세션을 끊지 않음 (중요)
+    Discord 로그인과 Gateway 연결을 분리해 운영합니다.
+
+    - 최초 REST 로그인 실패(특히 Cloudflare 429)는 자체 백오프로 재시도
+    - 실패 시 닫힌 connector를 재사용하지 않도록 HTTP 상태를 재생성
+    - 로그인 성공 후 Gateway 재연결은 discord.py의 connect(reconnect=True)에 맡김
+    - 잘못된 토큰은 빠르게 반복 호출하지 않음
     """
-    base = 1800          # 30분
-    max_backoff = 7200   # 2시간
-    penalty = 0          # 연속 429 누적
+    cloudflare_penalty = 0
 
     while True:
+        now_iso = datetime.now(KST).isoformat()
+        _diag_set(
+            phase="logging_in",
+            last_attempt_at=now_iso,
+            next_retry_at="",
+        )
+        logging.info("[login] Discord REST login attempt #%s", _LOGIN_DIAG["retry_count"] + 1)
+
         try:
-            print("[login] bot.start 진입")
-            # ❌ timeout 제거: 실행 중에는 세션을 끊지 않는다
-            await bot.start(TOKEN)
-            print("[login] bot.start returned unexpectedly. restarting soon.")
-            await _reset_bot_client_state()
-            await asyncio.sleep(10)
-            continue
-            
-        except discord.HTTPException as e:
-            # 로그인/연결 직전 단계의 HTTP 오류만 백오프
-            status = getattr(e, "status", None)
-            await _reset_bot_client_state()
+            # 로그인 REST 요청이 무기한 걸리지 않게 상한을 둡니다.
+            await asyncio.wait_for(bot.login(TOKEN), timeout=45)
+
+            endpoint_url = _interaction_endpoint_url()
+            _diag_set(
+                phase="gateway_connecting",
+                last_error="",
+                last_http_status=None,
+                next_retry_at="",
+                last_login_at=datetime.now(KST).isoformat(),
+            )
+            cloudflare_penalty = 0
+
+            if endpoint_url:
+                logging.error(
+                    "[login] CRITICAL: Discord application has Interactions Endpoint URL=%s. "
+                    "Slash commands will not arrive through Gateway until it is removed in Developer Portal.",
+                    endpoint_url,
+                )
+            else:
+                logging.info("[login] REST login successful; connecting Gateway")
+
+            # 이 시점부터 일시적인 WebSocket 단절/재연결은 discord.py가 직접 관리합니다.
+            try:
+                await bot.connect(reconnect=True)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                _diag_set(
+                    phase="gateway_failed",
+                    last_error=f"{type(exc).__name__}: {str(exc)[:500]}",
+                )
+                logging.exception("[gateway] fatal connection error")
+                raise
+
+            # 정상 운영 중 connect()가 반환되는 것은 일반적인 상황이 아닙니다.
+            raise RuntimeError("Discord Gateway connect() returned unexpectedly")
+
+        except discord.LoginFailure as exc:
+            _diag_set(
+                phase="login_failed",
+                last_error=f"LoginFailure: {str(exc)[:500]}",
+                last_http_status=401,
+                retry_count=_LOGIN_DIAG["retry_count"] + 1,
+            )
+            logging.error("[login] invalid Discord token: %s", exc)
+            await _reset_discord_http_after_failed_login()
+            wait = 3600
+
+        except discord.PrivilegedIntentsRequired as exc:
+            _diag_set(
+                phase="privileged_intents_required",
+                last_error=f"PrivilegedIntentsRequired: {str(exc)[:500]}",
+                retry_count=_LOGIN_DIAG["retry_count"] + 1,
+            )
+            logging.error("[login] privileged intents are not enabled: %s", exc)
+            await _reset_discord_http_after_failed_login()
+            wait = 3600
+
+        except discord.HTTPException as exc:
+            status = getattr(exc, "status", None)
+            retry_after = _http_retry_after_seconds(exc)
+            _diag_set(
+                phase="rate_limited" if status == 429 else "http_error",
+                last_error=f"{type(exc).__name__}: {str(exc)[:500]}",
+                last_http_status=status,
+                retry_count=_LOGIN_DIAG["retry_count"] + 1,
+            )
+            await _reset_discord_http_after_failed_login()
 
             if status == 429:
-                penalty = min(penalty + 1, 3)                       # 0→1→2→3
-                wait = min(base + penalty * 1800, max_backoff)       # 30→60→90→120
-                wait = int(wait * random.uniform(0.95, 1.1))
-                print(f"[login] 429/Cloudflare rate limit. backoff {wait}s")
-                await asyncio.sleep(wait)
-                continue
+                cloudflare_penalty = min(cloudflare_penalty + 1, 4)
+                if retry_after is not None:
+                    # 서버가 준 값을 우선하되 너무 짧은 즉시 재시도는 피합니다.
+                    wait = max(60, int(retry_after) + 5)
+                else:
+                    # Cloudflare형 429는 Retry-After가 없을 수 있으므로 보수적으로 대기합니다.
+                    wait = min(1800 * cloudflare_penalty, 7200)
+                wait = int(wait * random.uniform(0.95, 1.05))
+                logging.warning(
+                    "[login] Discord/Cloudflare 429. retry_after=%s; backoff=%ss",
+                    retry_after,
+                    wait,
+                )
+            else:
+                wait = int(300 * random.uniform(0.9, 1.1))
+                logging.warning("[login] HTTP %s; retry in %ss: %r", status, wait, exc)
 
-            wait = int(min(base, max_backoff) * random.uniform(0.5, 1.0))
-            print(f"[login] HTTP {status}; backoff {wait}s: {e!r}")
-            await asyncio.sleep(wait)
+        except asyncio.TimeoutError:
+            _diag_set(
+                phase="login_timeout",
+                last_error="Discord REST login timed out after 45 seconds",
+                last_http_status=None,
+                retry_count=_LOGIN_DIAG["retry_count"] + 1,
+            )
+            logging.error("[login] Discord REST login timeout (45s)")
+            await _reset_discord_http_after_failed_login()
+            wait = 120
 
-        except RuntimeError as e:
-            # 드문 런타임 오류에 대해 보수적 백오프 후 재시도
-            await _reset_bot_client_state()
-            wait = int(900 * random.uniform(0.8, 1.2))
-            print(f"[login] RuntimeError; backoff {wait}s: {e!r}")
-            await asyncio.sleep(wait)
+        except RuntimeError as exc:
+            # 특히 과거에 발생했던 'Session is closed'도 여기서 새 HTTP 연결로 복구합니다.
+            _diag_set(
+                phase="runtime_error",
+                last_error=f"RuntimeError: {str(exc)[:500]}",
+                retry_count=_LOGIN_DIAG["retry_count"] + 1,
+            )
+            logging.exception("[login] RuntimeError")
+            await _reset_discord_http_after_failed_login()
+            wait = 90
 
-        except Exception as e:
-            # 알 수 없는 예외
-            await _reset_bot_client_state()
-            wait = int(900 * random.uniform(0.8, 1.2))
-            print(f"[login] unexpected; backoff {wait}s: {e!r}")
-            await asyncio.sleep(wait)
+        except asyncio.CancelledError:
+            raise
 
+        except Exception as exc:
+            _diag_set(
+                phase="unexpected_error",
+                last_error=f"{type(exc).__name__}: {str(exc)[:500]}",
+                retry_count=_LOGIN_DIAG["retry_count"] + 1,
+            )
+            logging.exception("[login] unexpected login error")
+            await _reset_discord_http_after_failed_login()
+            wait = 180
+
+        retry_at = datetime.now(KST) + timedelta(seconds=wait)
+        _diag_set(
+            next_retry_at=retry_at.isoformat(),
+        )
+        logging.info("[login] next retry at %s (KST)", retry_at.strftime("%Y-%m-%d %H:%M:%S"))
+        await asyncio.sleep(wait)
 
 
 # --- 강제 로깅 활성화 (INFO 이상 콘솔 출력)
@@ -4413,12 +4685,12 @@ logging.getLogger("discord.client").setLevel(logging.INFO)
 logging.getLogger("discord.gateway").setLevel(logging.INFO)
 logging.getLogger("discord.http").setLevel(logging.INFO)
 
-# 프로그램 시작 시: 포트를 먼저 바인딩하고, 그 다음 디스코드 봇을 시작
+
 async def _main():
-    # 포트 바인딩(웹 서버) 먼저 시작 → Render의 포트 스캔 통과
+    # Render 포트부터 바인딩한 뒤 Discord 로그인/게이트웨이를 시작합니다.
     await start_web_app()
-    # 이후 디스코드 로그인 루프 진입
     await _safe_start()
+
 
 if __name__ == "__main__":
     asyncio.run(_main())
