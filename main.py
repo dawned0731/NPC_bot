@@ -4695,68 +4695,166 @@ async def start_web_app():
         logging.exception(f"[web] failed to start: {e}")
         # 웹이 죽어도 봇은 계속 켠다
 
-async def _reset_bot_client_state():
-    """연결 실패 후 동일 Bot 인스턴스를 다시 사용할 수 있게 초기화합니다."""
-    try:
-        await bot.close()
-    except Exception:
-        pass
-    try:
-        bot.clear()
-    except Exception:
-        pass
+def _http_retry_after_seconds(error: Exception) -> float | None:
+    """Discord HTTP 오류에서 Retry-After 값을 가능한 범위에서 안전하게 추출합니다."""
+    response = getattr(error, "response", None)
+    headers = getattr(response, "headers", None)
+    if headers:
+        try:
+            raw = headers.get("Retry-After")
+            if raw is not None:
+                value = float(raw)
+                if value >= 0:
+                    return value
+        except (TypeError, ValueError):
+            pass
+
+    # discord.py 버전에 따라 오류 본문이 문자열/딕셔너리 형태일 수 있어 둘 다 대응합니다.
+    body = getattr(error, "text", None)
+    if isinstance(body, dict):
+        raw = body.get("retry_after")
+        try:
+            value = float(raw)
+            if value >= 0:
+                return value
+        except (TypeError, ValueError):
+            pass
+    elif isinstance(body, str) and body:
+        try:
+            parsed = json.loads(body)
+            if isinstance(parsed, dict) and parsed.get("retry_after") is not None:
+                value = float(parsed["retry_after"])
+                if value >= 0:
+                    return value
+        except (json.JSONDecodeError, TypeError, ValueError):
+            pass
+
+    return None
+
+
+def _login_backoff_seconds(failure_count: int, *, base: int, cap: int) -> int:
+    """로그인 재시도 간격을 지수형으로 늘리되 상한을 둡니다."""
+    failure_count = max(1, int(failure_count))
+    exponent = min(failure_count - 1, 6)
+    raw = min(base * (2 ** exponent), cap)
+    # 서버가 요구한 대기시간보다 짧아지는 하향 지터는 사용하지 않습니다.
+    return max(1, int(raw * random.uniform(1.0, 1.10)))
 
 
 async def _safe_start():
     """
-    디스코드 로그인 안전 실행:
-    - 로그인/연결 전에 발생하는 예외만 백오프 재시도
-    - 실행 후에는 timeout으로 세션을 끊지 않음 (중요)
+    Discord 시작을 두 단계로 분리합니다.
+
+    1) 최초 HTTP 로그인만 제한적으로 재시도합니다.
+       - 429: 10분 → 20분 → 30분(상한)
+       - 5xx/네트워크 오류: 1분 → 2분 → 4분 → 5분(상한)
+       - Retry-After가 있으면 그 값을 절대 밑돌지 않습니다.
+    2) 로그인 성공 후 Gateway 연결은 discord.py의 reconnect=True에 맡깁니다.
+
+    핵심: 로그인 실패 때 bot.close()를 호출하지 않습니다.
+    닫힌 aiohttp 세션을 같은 Bot 인스턴스에서 반복 재사용해
+    `RuntimeError: Session is closed`가 이어지는 경로를 차단합니다.
     """
-    base = 1800          # 30분
-    max_backoff = 7200   # 2시간
-    penalty = 0          # 연속 429 누적
+    login_failures = 0
 
     while True:
         try:
-            print("[login] bot.start 진입")
-            # ❌ timeout 제거: 실행 중에는 세션을 끊지 않는다
-            await bot.start(TOKEN)
-            print("[login] bot.start returned unexpectedly. restarting soon.")
-            await _reset_bot_client_state()
-            await asyncio.sleep(10)
-            continue
-            
+            logging.info("[login] authenticating with Discord")
+            await bot.login(TOKEN)
+            logging.info("[login] authentication succeeded")
+            break
+
         except discord.HTTPException as e:
-            # 로그인/연결 직전 단계의 HTTP 오류만 백오프
             status = getattr(e, "status", None)
-            await _reset_bot_client_state()
+            login_failures += 1
 
             if status == 429:
-                penalty = min(penalty + 1, 3)                       # 1→2→3
-                wait = min(base + penalty * 1800, max_backoff)       # 60→90→120분
-                wait = int(wait * random.uniform(0.95, 1.1))
-                print(f"[login] 429/Cloudflare rate limit. backoff {wait}s")
+                server_retry = _http_retry_after_seconds(e)
+                wait = _login_backoff_seconds(
+                    login_failures,
+                    base=600,   # 10분
+                    cap=1800,   # 30분
+                )
+                if server_retry is not None:
+                    # Retry-After보다 최소 5초 여유를 둡니다.
+                    wait = max(wait, int(server_retry) + 5)
+
+                logging.warning(
+                    "[login] HTTP 429 rate limited; retry in %ss (attempt=%s, server_retry=%s)",
+                    wait,
+                    login_failures,
+                    server_retry,
+                )
                 await asyncio.sleep(wait)
                 continue
 
-            wait = int(min(base, max_backoff) * random.uniform(0.5, 1.0))
-            print(f"[login] HTTP {status}; backoff {wait}s: {e!r}")
+            if isinstance(status, int) and 500 <= status <= 599:
+                wait = _login_backoff_seconds(
+                    login_failures,
+                    base=60,
+                    cap=300,
+                )
+                logging.warning(
+                    "[login] Discord HTTP %s; retry in %ss (attempt=%s): %r",
+                    status,
+                    wait,
+                    login_failures,
+                    e,
+                )
+                await asyncio.sleep(wait)
+                continue
+
+            # 401/403 등 설정·토큰 계열 오류는 무한 재시도하지 않고 즉시 실패시킵니다.
+            logging.exception("[login] non-retryable Discord HTTP error status=%s", status)
+            raise
+
+        except aiohttp.ClientError as e:
+            login_failures += 1
+            wait = _login_backoff_seconds(
+                login_failures,
+                base=60,
+                cap=300,
+            )
+            logging.warning(
+                "[login] network error; retry in %ss (attempt=%s): %r",
+                wait,
+                login_failures,
+                e,
+            )
             await asyncio.sleep(wait)
+            continue
 
         except RuntimeError as e:
-            # 드문 런타임 오류에 대해 보수적 백오프 후 재시도
-            await _reset_bot_client_state()
-            wait = int(900 * random.uniform(0.8, 1.2))
-            print(f"[login] RuntimeError; backoff {wait}s: {e!r}")
-            await asyncio.sleep(wait)
+            # 과거 배포에서 닫힌 HTTP 세션 상태가 남았을 때 한 번 복구할 수 있도록 합니다.
+            if "session is closed" in str(e).lower():
+                login_failures += 1
+                try:
+                    bot.clear()
+                except Exception:
+                    logging.exception("[login] bot.clear() failed while recovering closed session")
+                    raise
 
-        except Exception as e:
-            # 알 수 없는 예외
-            await _reset_bot_client_state()
-            wait = int(900 * random.uniform(0.8, 1.2))
-            print(f"[login] unexpected; backoff {wait}s: {e!r}")
-            await asyncio.sleep(wait)
+                wait = _login_backoff_seconds(
+                    login_failures,
+                    base=60,
+                    cap=300,
+                )
+                logging.warning(
+                    "[login] closed HTTP session detected; client state cleared; retry in %ss",
+                    wait,
+                )
+                await asyncio.sleep(wait)
+                continue
+            raise
+
+    # Client.start(token, reconnect=True)의 두 번째 단계와 동일하게 Gateway에 연결합니다.
+    # 연결이 성립한 뒤의 일시적인 Gateway 장애는 discord.py 자체 재접속 로직이 담당합니다.
+    logging.info("[gateway] connecting with reconnect=True")
+    await bot.connect(reconnect=True)
+
+    # 정상 운영 중에는 connect()가 임의로 반환하지 않습니다.
+    # 여기까지 왔다면 프로세스를 정상 상태로 가장하지 말고 Render가 재시작할 수 있게 실패시킵니다.
+    raise RuntimeError("Discord gateway loop returned unexpectedly")
 
 
 
