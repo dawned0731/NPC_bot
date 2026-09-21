@@ -37,7 +37,20 @@ def default_config():
 
 def option_items(config, question):
     options = config["questions"].get(question) or {}
-    return sorted(options.items(), key=lambda item: item[1]["label"], reverse=question == "year")
+    def order(entry):
+        key, item = entry
+        if "order" in item:
+            return (0, int(item["order"]), item["label"])
+        if question == "gender":
+            return (1, {"male": 0, "female": 1}.get(key, 2), item["label"])
+        if question == "year":
+            digits = "".join(c for c in item["label"] if c.isdigit())
+            year = int(digits) if digits else 0
+            if len(digits) == 2:
+                year += 2000 if year < 50 else 1900
+            return (1, -year, item["label"])
+        return (1, 0, item["label"])
+    return sorted(options.items(), key=order)
 
 
 def managed_ids(config):
@@ -129,9 +142,17 @@ class Onboarding:
         await self.store.put(f"sessions/{member.guild.id}/{member.id}", session)
 
     def role(self, guild, role_id):
+        if not role_id or str(role_id) == "0":
+            raise ValueError("역할이 아직 연결되지 않았습니다. /입장역할연결에서 기존 역할을 선택해주세요.")
         role = guild.get_role(int(role_id))
-        if not role or role.is_default() or role.managed or role >= guild.me.top_role:
-            raise ValueError(f"지급 가능한 역할이 아닙니다: {role_id}. 봇 역할을 더 위에 배치해주세요.")
+        if not role:
+            raise ValueError(f"설정된 역할(ID {role_id})이 서버에 없습니다. 삭제되었다면 기존 역할을 다시 연결해주세요.")
+        if role.is_default():
+            raise ValueError("@everyone은 자동 지급할 역할로 선택할 수 없습니다.")
+        if role.managed:
+            raise ValueError(f"'{role.name}'은 봇/연동 서비스가 관리하는 역할이라 직접 지급할 수 없습니다.")
+        if role >= guild.me.top_role:
+            raise ValueError(f"'{role.name}'이 봇의 최상위 역할 '{guild.me.top_role.name}'보다 높거나 같습니다. 이 역할보다 봇 역할을 위로 옮겨주세요.")
         # Admission must never grant moderation or server-management powers.
         dangerous = ("administrator", "manage_guild", "manage_roles", "manage_channels",
                      "kick_members", "ban_members", "moderate_members", "manage_webhooks",
@@ -140,65 +161,92 @@ class Onboarding:
             raise ValueError(f"관리 권한이 있는 역할은 입장 선택지에 사용할 수 없습니다: {role.name}")
         return role
 
-    def validate(self, guild, config):
+    def inspect(self, guild, config):
+        """Collect every actionable problem without stopping at the first failure."""
+        errors = []
         lobby = guild.get_channel(int(config.get("lobby_id", 0)))
         if not isinstance(lobby, discord.TextChannel) or lobby.type != discord.ChannelType.text:
-            raise ValueError("대기 채널은 일반 텍스트 채널로 지정해주세요.")
+            errors.append("[기본 설정] 일반 텍스트 대기 채널을 /입장기본설정으로 지정해주세요.")
+            lobby = None
         if guild.premium_tier < 2:
-            raise ValueError("비공개 스레드를 사용하려면 서버 부스트 2레벨 이상이 필요합니다.")
-        perms = lobby.permissions_for(guild.me)
-        required = ("view_channel", "send_messages", "read_message_history",
-                    "create_private_threads", "send_messages_in_threads", "manage_threads")
-        if not all(getattr(perms, key) for key in required) or not guild.me.guild_permissions.manage_roles:
-            raise ValueError("봇의 역할 관리 및 대기 채널의 메시지·비공개 스레드 생성/관리 권한을 확인해주세요.")
-        everyone = lobby.permissions_for(guild.default_role)
-        if not everyone.view_channel or not everyone.read_message_history:
-            raise ValueError("신입(@everyone)이 대기 채널과 메시지 기록을 볼 수 있어야 합니다.")
-        role_ids = [int(config.get("member_role_id", 0))]
-        for key in LABELS:
+            errors.append("[서버] 비공개 스레드에는 부스트 2레벨 이상이 필요합니다.")
+        if not guild.me.guild_permissions.manage_roles:
+            errors.append("[봇 권한] 역할 관리 권한이 없습니다. 역할 위치와는 별도 설정입니다.")
+        if lobby:
+            required = {"view_channel": "채널 보기", "send_messages": "메시지 보내기",
+                        "read_message_history": "메시지 기록 보기", "create_private_threads": "비공개 스레드 생성",
+                        "send_messages_in_threads": "스레드에서 메시지 보내기", "manage_threads": "스레드 관리"}
+            perms = lobby.permissions_for(guild.me)
+            missing = [label for key, label in required.items() if not getattr(perms, key)]
+            if missing:
+                errors.append(f"[대기 채널] 봇에게 필요한 권한: {', '.join(missing)}")
+            everyone = lobby.permissions_for(guild.default_role)
+            if not everyone.view_channel or not everyone.read_message_history:
+                errors.append("[대기 채널] @everyone에게 채널 보기와 메시지 기록 보기를 허용해주세요.")
+        entries = [("기본 회원 역할", int(config.get("member_role_id", 0)))]
+        for label, key in QUESTIONS.items():
             items = option_items(config, key)
             limit = 24 if key == "year" else 25
             if not 1 <= len(items) <= limit:
-                raise ValueError(f"{key}: 선택지를 1~{limit}개 설정해주세요.")
-            role_ids.extend(int(item.get("role_id", 0)) for _, item in items)
-        if len(role_ids) != len(set(role_ids)):
-            raise ValueError("각 선택지와 기본 역할은 서로 다른 역할에 연결해야 합니다.")
-        for role_id in role_ids:
-            role = self.role(guild, role_id)
-            overwrite = lobby.overwrites_for(role)
-            if overwrite.view_channel is False or overwrite.read_message_history is False:
-                raise ValueError(f"{role.name} 역할이 대기 채널 접근을 막습니다. 안내 완료까지 접근을 유지해주세요.")
+                errors.append(f"[{label}] /입장역할연결로 선택지를 1~{limit}개 설정해주세요.")
+            entries.extend((f"{label} / {item['label']}", int(item.get("role_id", 0))) for _, item in items)
+        seen, roles = {}, {}
+        for label, role_id in entries:
+            if role_id and role_id in seen:
+                errors.append(f"[{label}] '{seen[role_id]}'와 같은 역할을 사용합니다. 항목마다 다른 역할을 연결해주세요.")
+            if role_id:
+                seen[role_id] = label
+            try:
+                role = self.role(guild, role_id)
+                roles[role_id] = role
+            except ValueError as error:
+                errors.append(f"[{label}] {error}")
+                continue
+            if lobby:
+                overwrite = lobby.overwrites_for(role)
+                if overwrite.view_channel is False or overwrite.read_message_history is False:
+                    errors.append(f"[{label}] '{role.name}' 역할이 대기 채널 접근을 막습니다.")
         for channel in guild.channels:
-            if channel.id != lobby.id and channel.permissions_for(guild.default_role).view_channel:
-                raise ValueError(f"@everyone에게 다른 채널이 보입니다: {channel.name}. 입장 권한부터 설정해주세요.")
-            if channel.id != lobby.id:
-                for role_id in role_ids[1:]:
-                    role = guild.get_role(role_id)
+            if isinstance(channel, discord.CategoryChannel) or (lobby and channel.id == lobby.id):
+                continue
+            if channel.permissions_for(guild.default_role).view_channel:
+                errors.append(f"[채널 접근] @everyone에게 다른 채널 '{channel.name}'이 보입니다. 채널 보기를 거부해주세요.")
+            for _, role_id in entries[1:]:
+                role = roles.get(role_id)
+                if role:
                     if channel.overwrites_for(role).view_channel is True:
-                        raise ValueError(f"{role.name} 역할이 {channel.name}을 엽니다. 채널 열기는 기본 역할에만 허용해주세요.")
+                        errors.append(f"[채널 접근] '{role.name}'이 '{channel.name}'을 엽니다. 채널 열기는 기본 역할에만 허용해주세요.")
         intros = config.get("introductions") or {}
-        if set(intros) != {"slot1", "slot2", "slot3", "slot4"}:
-            raise ValueError("소개할 채널을 1~4번 모두 설정해주세요.")
-        for item in intros.values():
-            channel = guild.get_channel(int(item["channel_id"]))
-            if not channel or not item.get("description"):
-                raise ValueError("소개 채널 또는 설명이 없습니다.")
-            if channel.overwrites_for(guild.get_role(role_ids[0])).view_channel is not True:
-                raise ValueError(f"기본 역할에 {channel.name} 채널 보기 권한을 명시적으로 허용해주세요.")
+        gate = roles.get(int(config.get("member_role_id", 0)))
+        for index in range(1, 5):
+            item = intros.get(f"slot{index}") or {}
+            channel = guild.get_channel(int(item.get("channel_id", 0)))
+            if not isinstance(channel, discord.TextChannel) or not item.get("description"):
+                errors.append(f"[채널 소개 {index}번] /입장채널소개로 채널과 설명을 지정해주세요.")
+            elif gate and channel.overwrites_for(gate).view_channel is not True:
+                errors.append(f"[채널 소개 {index}번] 기본 역할에 '{channel.name}' 채널 보기를 명시적으로 허용해주세요.")
         log = guild.get_channel(int(config.get("log_id", 0)))
-        if not isinstance(log, discord.TextChannel) or not log.permissions_for(guild.me).send_messages:
-            raise ValueError("봇이 메시지를 보낼 수 있는 비공개 기록 채널을 설정해주세요.")
-        # Ordinary roles must not reveal the answers in the log channel.
-        if log.permissions_for(guild.default_role).view_channel:
-            raise ValueError("입장 기록 채널을 @everyone에게 숨겨주세요.")
-        for role in guild.roles:
-            if not role.permissions.administrator and log.overwrites_for(role).view_channel is True:
-                if role not in guild.me.roles:
-                    raise ValueError("기록 채널은 서버장과 봇 전용으로 설정해주세요.")
-        for target, overwrite in log.overwrites.items():
-            if isinstance(target, discord.Member) and target.id not in {guild.owner_id, guild.me.id}:
-                if overwrite.view_channel is True:
-                    raise ValueError("기록 채널의 다른 회원 전용 보기 허용을 제거해주세요.")
+        if not isinstance(log, discord.TextChannel):
+            errors.append("[기록 채널] /입장기본설정으로 비공개 기록 채널을 지정해주세요.")
+        else:
+            perms = log.permissions_for(guild.me)
+            if not perms.view_channel or not perms.send_messages:
+                errors.append("[기록 채널] 봇에게 채널 보기와 메시지 보내기를 허용해주세요.")
+            if log.permissions_for(guild.default_role).view_channel:
+                errors.append("[기록 채널] @everyone에게 숨겨주세요.")
+            for role in guild.roles:
+                if not role.permissions.administrator and log.overwrites_for(role).view_channel is True and role not in guild.me.roles:
+                    errors.append(f"[기록 채널] '{role.name}' 역할의 보기 허용을 제거해주세요. 서버장과 봇 전용입니다.")
+            for target, overwrite in log.overwrites.items():
+                if isinstance(target, discord.Member) and target.id not in {guild.owner_id, guild.me.id} and overwrite.view_channel is True:
+                    errors.append(f"[기록 채널] 회원 {target.id}의 개별 보기 허용을 제거해주세요.")
+        return list(dict.fromkeys(errors))
+
+    def validate(self, guild, config):
+        errors = self.inspect(guild, config)
+        if errors:
+            preview = "\n".join(errors)[:1400]
+            raise ValueError(f"설정에서 {len(errors)}개 문제를 찾았습니다.\n{preview}\n\n/입장검사로 전체 결과를 확인해주세요.")
 
     async def audit(self, guild, config, content):
         channel = guild.get_channel(int(config.get("log_id", 0)))
@@ -383,7 +431,7 @@ class Onboarding:
             LOG.exception("Admission start failed guild=%s member=%s", member.guild.id, member.id)
             try:
                 await self.audit(member.guild, await self.config(member.guild.id),
-                                 f"입장 안내 시작 실패: {member.id}. 권한 확인 후 /입장관리 이어하기를 사용해주세요.")
+                                 f"입장 안내 시작 실패: {member.id}. 권한 확인 후 /입장이어하기를 사용해주세요.")
             except Exception:
                 LOG.exception("Admission start failure could not be reported")
 
@@ -452,7 +500,7 @@ class Onboarding:
         return False
 
 
-class OnboardingCommands(commands.Cog):
+class _SettingsActions:
     def __init__(self, service):
         self.service = service
 
@@ -483,7 +531,7 @@ class OnboardingCommands(commands.Cog):
             result = "설정했습니다."
             if 작업 == "기본":
                 if config["enabled"]:
-                    raise ValueError("기본 설정 변경 전 안내를 꺼주세요. 진행 중인 신입은 이전 설정을 유지하므로 필요하면 /입장관리 재시작을 사용해주세요.")
+                    raise ValueError("기본 설정 변경 전 안내를 꺼주세요. 진행 중인 신입은 이전 설정을 유지하므로 필요하면 /입장재시작을 사용해주세요.")
                 for key, value in (("lobby_id", 대기채널), ("member_role_id", 기본역할), ("log_id", 기록채널)):
                     if value is not None:
                         if key == "member_role_id":
@@ -496,7 +544,7 @@ class OnboardingCommands(commands.Cog):
                 if 작업 == "켜기":
                     config["enabled"] = True
                     await service.save_config(interaction.guild_id, config)
-                    result += " 새 입장 안내를 켰습니다. /입장설정 안내게시로 이어하기 버튼을 게시해주세요."
+                    result += " 새 입장 안내를 켰습니다. /입장안내게시로 이어하기 버튼을 게시해주세요."
             elif 작업 == "끄기":
                 config["enabled"] = False
                 await service.save_config(interaction.guild_id, config)
@@ -527,7 +575,8 @@ class OnboardingCommands(commands.Cog):
     async def options(self, interaction: discord.Interaction, 작업: Literal["등록", "삭제", "목록"],
                       질문: Literal["성별", "출생연도", "관심사"],
                       선택지: app_commands.Range[str, 1, 80] | None = None,
-                      역할: discord.Role | None = None):
+                      역할: discord.Role | None = None,
+                      순서: int | None = None):
         await interaction.response.defer(ephemeral=True)
         service = self.service
         async with service.lock(interaction.guild_id, "config"):
@@ -564,11 +613,14 @@ class OnboardingCommands(commands.Cog):
                 limit = 24 if question == "year" else 25
                 if key is None and len(options) >= limit:
                     raise ValueError(f"선택지는 최대 {limit}개입니다.")
-                options[key or uuid.uuid4().hex] = {"label": label, "role_id": 역할.id}
+                item = {**(options.get(key) or {}), "label": label, "role_id": 역할.id}
+                if 순서 is not None:
+                    item["order"] = 순서
+                options[key or uuid.uuid4().hex] = item
             if config["enabled"]:
                 service.validate(interaction.guild, config)
             await service.save_config(interaction.guild_id, config)
-            await interaction.followup.send("선택지를 저장했습니다. 새로 시작하는 신입부터 적용됩니다. 진행 중인 신입에게 적용하려면 /입장관리 재시작을 사용해주세요.", ephemeral=True)
+            await interaction.followup.send("선택지를 저장했습니다. 새로 시작하는 신입부터 적용됩니다. 진행 중인 신입에게 적용하려면 /입장재시작을 사용해주세요.", ephemeral=True)
 
     @app_commands.command(name="입장채널소개", description="입장 완료 후 소개할 채널 4개를 설정합니다")
     @app_commands.guild_only()
@@ -618,6 +670,195 @@ class OnboardingCommands(commands.Cog):
             대상 = await interaction.guild.fetch_member(대상.id)
         thread = await service.start(대상)
         await interaction.followup.send(f"입장 안내: {thread.mention}", ephemeral=True)
+
+
+async def send_report(interaction, lines):
+    """Keep long audits readable and below Discord's per-message limit."""
+    page = ""
+    for line in lines:
+        if page and len(page) + len(line) + 1 > 1800:
+            await interaction.followup.send(page, ephemeral=True, allowed_mentions=NO_PING)
+            page = ""
+        page += line + "\n"
+    if page:
+        await interaction.followup.send(page, ephemeral=True, allowed_mentions=NO_PING)
+
+
+class OnboardingCommands(commands.Cog):
+    """One task per command; no irrelevant parameters or action selectors."""
+    def __init__(self, service):
+        self.service = service
+        self.actions = _SettingsActions(service)
+
+    async def cog_app_command_error(self, interaction, error):
+        await self.actions.cog_app_command_error(interaction, error)
+
+    @app_commands.command(name="입장도움말", description="처음 설정할 때: 1~6단계 순서와 사용할 명령어를 보여줍니다")
+    @app_commands.guild_only()
+    @app_commands.default_permissions(administrator=True)
+    @app_commands.checks.has_permissions(administrator=True)
+    async def help(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        await send_report(interaction, [
+            "**입장 안내 설정 순서**",
+            "1️⃣ `/입장기본설정` — 대기 채널, 기본 회원 역할, 기록 채널을 지정합니다.",
+            "2️⃣ `/입장역할연결` — 질문 → 선택지 → 기존 역할 순서로 연결합니다. 선택지는 추천 목록에서 고를 수 있습니다.",
+            "3️⃣ `/입장채널소개` — 소개 순서 1~4번에 채널과 설명을 지정합니다.",
+            "4️⃣ `/입장검사` — 추가 선택 없이 모든 설정을 한 번에 검사합니다.",
+            "5️⃣ `/입장안내게시` — 대기 채널에 시작·이어하기 버튼을 게시합니다.",
+            "6️⃣ `/입장시작` — 자동 입장 안내를 켭니다.", "",
+            "**확인과 수정**",
+            "`/입장현황` — 채널, 역할 연결, 소개를 실제 표시 순서대로 모두 확인합니다.",
+            "`/입장선택지삭제` — 사용하지 않을 선택지를 삭제합니다.",
+            "`/입장이어하기` — 특정 신입의 안내를 재개합니다.",
+            "`/입장재시작` — 해당 신입의 입장 역할을 회수하고 현재 설정으로 다시 시작합니다.",
+            "`/입장중지` — 새 안내를 끄고 기존 첫 채팅 역할 지급 방식으로 돌아갑니다.", "",
+            "성별·출생연도는 하나, 관심사는 복수 선택입니다. '그 외 나이'는 자동으로 추가됩니다.",
+            "역할연결의 선택지에 기존 이름을 고르면 수정, 새 이름을 입력하면 추가됩니다.",
+            "순서를 지정하면 작은 번호부터 표시됩니다. 기본 출생연도 순서는 07년생 → 90년생입니다.",
+            "저장한 설정은 유지됩니다. 진행 중인 신입에게 변경을 적용하려면 /입장재시작을 사용하세요."])
+
+    @app_commands.command(name="입장현황", description="현재 채널·역할 연결·소개 4개를 설정 순서대로 모두 확인합니다")
+    @app_commands.guild_only()
+    @app_commands.default_permissions(administrator=True)
+    @app_commands.checks.has_permissions(administrator=True)
+    async def overview(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        config = await self.service.config(interaction.guild_id)
+        def channel_label(ident):
+            channel = interaction.guild.get_channel(int(ident or 0))
+            return channel.mention if channel else "⚠ 미설정 또는 삭제된 채널"
+        def role_label(ident):
+            role = interaction.guild.get_role(int(ident or 0))
+            return f"{role.name} (<@&{role.id}>)" if role else "⚠ 역할 미연결 또는 삭제됨"
+        lines = [f"**입장 안내: {'켜짐' if config['enabled'] else '꺼짐'}**", "**1. 기본 설정**",
+                 f"대기 채널: {channel_label(config['lobby_id'])}",
+                 f"기본 회원 역할: {role_label(config['member_role_id'])}",
+                 f"기록 채널: {channel_label(config['log_id'])}", "", "**2. 선택지 → 기존 역할**"]
+        for label, question in QUESTIONS.items():
+            lines.append(f"**{label}**")
+            items = option_items(config, question)
+            if not items:
+                lines.append("⚠ 선택지가 없습니다.")
+            for index, (_, item) in enumerate(items, 1):
+                lines.append(f"{index}. {item['label']} → {role_label(item.get('role_id'))}")
+            if question == "year":
+                lines.append("마지막. 그 외 나이 → 입장 제한 (고정)")
+        lines.extend(["", "**3. 채널 소개**"])
+        for index in range(1, 5):
+            intro = (config.get("introductions") or {}).get(f"slot{index}") or {}
+            lines.append(f"{index}. {channel_label(intro.get('channel_id'))} — {intro.get('description', '설명 미설정')}")
+        lines.extend(["", "다음: `/입장검사`로 전체 설정을 검사해주세요."])
+        await send_report(interaction, lines)
+
+    @app_commands.command(name="입장검사", description="입력 항목 없이 모든 채널·역할·선택지·권한을 한 번에 검사합니다")
+    @app_commands.guild_only()
+    @app_commands.default_permissions(administrator=True)
+    @app_commands.checks.has_permissions(administrator=True)
+    async def check(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        config = await self.service.config(interaction.guild_id)
+        errors = self.service.inspect(interaction.guild, config)
+        if errors:
+            lines = [f"**전체 검사 결과: 수정할 항목 {len(errors)}개**",
+                     "아래 항목을 수정한 뒤 /입장검사를 다시 실행해주세요.", ""]
+            lines.extend(f"{index}. {error}" for index, error in enumerate(errors, 1))
+        else:
+            lines = ["✅ **전체 검사 통과**", "기본 채널·역할, 모든 선택지, 소개 4개, 봇 권한을 확인했습니다.",
+                     "다음: `/입장안내게시` → `/입장시작` 순서로 실행해주세요."]
+        await send_report(interaction, lines)
+
+    @app_commands.command(name="입장기본설정", description="1단계: 대기 채널 → 기본 회원 역할 → 비공개 기록 채널 지정")
+    @app_commands.describe(대기채널="신입에게 처음 보이는 일반 텍스트 채널", 기본역할="모든 질문 완료 후 지급할 기존 회원 역할",
+                           기록채널="서버장과 봇이 입장 결과를 확인할 비공개 채널")
+    @app_commands.guild_only()
+    @app_commands.default_permissions(administrator=True)
+    @app_commands.checks.has_permissions(administrator=True)
+    async def basic(self, interaction: discord.Interaction, 대기채널: discord.TextChannel,
+                    기본역할: discord.Role, 기록채널: discord.TextChannel):
+        await self.actions.configure.callback(self.actions, interaction, "기본", 대기채널, 기본역할, 기록채널)
+
+    @app_commands.command(name="입장역할연결", description="2단계: 선택지에 기존 역할 연결. 같은 선택지면 수정, 새 이름이면 추가")
+    @app_commands.describe(질문="성별 → 출생연도 → 관심사 순서로 설정하세요", 선택지="추천 목록에서 선택하거나 새 선택지 이름 입력",
+                           역할="선택 시 지급할 기존 서버 역할", 순서="선택 사항: 작은 번호부터 표시 (예: 1, 2, 3)")
+    @app_commands.guild_only()
+    @app_commands.default_permissions(administrator=True)
+    @app_commands.checks.has_permissions(administrator=True)
+    async def link(self, interaction: discord.Interaction, 질문: Literal["성별", "출생연도", "관심사"],
+                   선택지: app_commands.Range[str, 1, 80], 역할: discord.Role,
+                   순서: app_commands.Range[int, 1, 25] | None = None):
+        await self.actions.options.callback(self.actions, interaction, "등록", 질문, 선택지, 역할, 순서)
+
+    async def suggest(self, interaction, current):
+        question = QUESTIONS.get(getattr(interaction.namespace, "질문", ""))
+        if not question or not interaction.guild_id or not interaction.user.guild_permissions.administrator:
+            return []
+        config = await self.service.config(interaction.guild_id)
+        return [app_commands.Choice(name=f"{item['label']} · {'연결됨' if item.get('role_id') else '미연결'}", value=item['label'])
+                for _, item in option_items(config, question) if current.casefold() in item['label'].casefold()][:25]
+
+    @link.autocomplete("선택지")
+    async def suggest_link(self, interaction: discord.Interaction, current: str):
+        return await self.suggest(interaction, current)
+
+    @app_commands.command(name="입장선택지삭제", description="사용하지 않을 선택지 삭제. '그 외 나이'는 삭제할 수 없습니다")
+    @app_commands.describe(질문="삭제할 선택지가 속한 질문", 선택지="삭제할 기존 선택지를 추천 목록에서 선택")
+    @app_commands.guild_only()
+    @app_commands.default_permissions(administrator=True)
+    @app_commands.checks.has_permissions(administrator=True)
+    async def delete(self, interaction: discord.Interaction, 질문: Literal["성별", "출생연도", "관심사"],
+                     선택지: app_commands.Range[str, 1, 80]):
+        await self.actions.options.callback(self.actions, interaction, "삭제", 질문, 선택지)
+
+    @delete.autocomplete("선택지")
+    async def suggest_delete(self, interaction: discord.Interaction, current: str):
+        return await self.suggest(interaction, current)
+
+    @app_commands.command(name="입장채널소개", description="3단계: 소개할 채널을 1번부터 4번까지 순서대로 지정합니다")
+    @app_commands.describe(순서="소개 순서: 1, 2, 3, 4", 채널="신입에게 소개할 기존 채팅 채널", 설명="이 채널에서 무엇을 하는지 짧게 설명")
+    @app_commands.guild_only()
+    @app_commands.default_permissions(administrator=True)
+    @app_commands.checks.has_permissions(administrator=True)
+    async def introduction(self, interaction: discord.Interaction, 순서: app_commands.Range[int, 1, 4],
+                           채널: discord.TextChannel, 설명: app_commands.Range[str, 1, 250]):
+        await self.actions.introduction.callback(self.actions, interaction, 순서, 채널, 설명)
+
+    @app_commands.command(name="입장안내게시", description="5단계: 전체 검사 후 대기 채널에 시작·이어하기 버튼 게시")
+    @app_commands.guild_only()
+    @app_commands.default_permissions(administrator=True)
+    @app_commands.checks.has_permissions(administrator=True)
+    async def publish(self, interaction: discord.Interaction):
+        await self.actions.configure.callback(self.actions, interaction, "안내게시")
+
+    @app_commands.command(name="입장시작", description="6단계: 전체 검사 후 신입 자동 입장 안내를 켭니다")
+    @app_commands.guild_only()
+    @app_commands.default_permissions(administrator=True)
+    @app_commands.checks.has_permissions(administrator=True)
+    async def enable(self, interaction: discord.Interaction):
+        await self.actions.configure.callback(self.actions, interaction, "켜기")
+
+    @app_commands.command(name="입장중지", description="새 안내를 끕니다. 기존 첫 채팅 역할 지급 방식이 다시 동작합니다")
+    @app_commands.guild_only()
+    @app_commands.default_permissions(administrator=True)
+    @app_commands.checks.has_permissions(administrator=True)
+    async def disable(self, interaction: discord.Interaction):
+        await self.actions.configure.callback(self.actions, interaction, "끄기")
+
+    @app_commands.command(name="입장이어하기", description="신입의 저장된 단계부터 안내를 이어갑니다")
+    @app_commands.describe(대상="안내를 이어갈 신입")
+    @app_commands.guild_only()
+    @app_commands.default_permissions(administrator=True)
+    @app_commands.checks.has_permissions(administrator=True)
+    async def resume(self, interaction: discord.Interaction, 대상: discord.Member):
+        await self.actions.manage.callback(self.actions, interaction, "이어하기", 대상)
+
+    @app_commands.command(name="입장재시작", description="대상자의 입장 역할을 회수하고 현재 설정으로 처음부터 안내합니다")
+    @app_commands.describe(대상="입장 역할을 회수하고 다시 안내할 회원")
+    @app_commands.guild_only()
+    @app_commands.default_permissions(administrator=True)
+    @app_commands.checks.has_permissions(administrator=True)
+    async def restart(self, interaction: discord.Interaction, 대상: discord.Member):
+        await self.actions.manage.callback(self.actions, interaction, "재시작", 대상)
 
 
 async def install(bot, initialize_member):
