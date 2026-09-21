@@ -15,6 +15,7 @@ import copy
 import functools
 import pytz
 import aiohttp
+from onboarding import install as install_onboarding
 
 from threading import Thread
 from datetime import time as dtime
@@ -1742,9 +1743,23 @@ bot = commands.Bot(
     intents=intents
 )
 
+onboarding_service = None
+
+
+async def initialize_admitted_member(member):
+    """Preserve existing XP, record admission activity, then apply season title."""
+    uid = str(member.id)
+    async with get_user_state_lock(uid):
+        user_data = await aget_user_exp(uid)
+        user_data["last_activity"] = time.time()
+        await afirebase_root_update_strict({f"exp_data/{uid}": user_data})
+    await update_role_and_nick(member, calculate_level(user_data.get("exp", 0)))
+
 
 @bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if interaction.extras.get("onboarding_error_handled"):
+        return
     original = getattr(error, "original", error)
     error_name = type(original).__name__
     if error_name == "MissingPermissions":
@@ -1814,6 +1829,10 @@ async def on_member_update(before, after):
 
     if before_roles != after_roles:
         await update_season_voice_channels(bot)
+
+    # The new admission flow owns welcome/init when enabled. Fail closed on DB errors.
+    if onboarding_service and await onboarding_service.enabled(after.guild.id):
+        return
 
     try:
         cfg = await aget_guild_config(after.guild.id)
@@ -2154,6 +2173,9 @@ async def on_message(message):
         if not text or not message.guild:
             return
 
+        admission = await onboarding_service.config(message.guild.id) if onboarding_service else {"enabled": False}
+        if onboarding_service and await onboarding_service.excludes_message(message, admission):
+            return
         cfg = await aget_guild_config(message.guild.id)
         thread_ch_id = _safe_int(
             _cfg_get(cfg, "channels", "thread_role_channel_id", default=THREAD_ROLE_CHANNEL_ID),
@@ -2164,7 +2186,7 @@ async def on_message(message):
             THREAD_ROLE_ID,
         )
 
-        if getattr(message.channel, "id", None) == thread_ch_id:
+        if not admission["enabled"] and getattr(message.channel, "id", None) == thread_ch_id:
             role = message.guild.get_role(thread_role_id) if thread_role_id else None
             member = message.author
             if role and isinstance(member, discord.Member) and role not in member.roles:
@@ -4874,8 +4896,10 @@ logging.getLogger("discord.http").setLevel(logging.INFO)
 
 # 프로그램 시작 시: 포트를 먼저 바인딩하고, 그 다음 디스코드 봇을 시작
 async def _main():
+    global onboarding_service
     # 포트 바인딩(웹 서버) 먼저 시작 → Render의 포트 스캔 통과
     await start_web_app()
+    onboarding_service = await install_onboarding(bot, initialize_admitted_member)
     # 이후 디스코드 로그인 루프 진입
     await _safe_start()
 
