@@ -10,6 +10,7 @@ import copy
 import logging
 import time
 import uuid
+import unicodedata
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 
@@ -32,7 +33,12 @@ def membership_stamp(member):
     return joined.astimezone(timezone.utc).isoformat() if joined else ""
 
 
-def admission_log(member, success, joined_at=""):
+def korean_nickname(name):
+    name = unicodedata.normalize("NFC", name)
+    return bool(name) and all("가" <= char <= "힣" for char in name)
+
+
+def admission_log(member, success, joined_at="", reason="", returning=False, previous_joined_at=""):
     joined = member.joined_at
     if not joined and joined_at:
         try:
@@ -41,7 +47,16 @@ def admission_log(member, success, joined_at=""):
             pass
     joined = joined or datetime.now(timezone.utc)
     nickname = " ".join(member.display_name.replace("/", "·").split())
-    return f"{'⭕' if success else '❌'} {member.id}/{nickname}/{joined.astimezone(KST):%Y-%m-%d %H:%M:%S}"
+    line = f"{'⭕' if success else '❌'} {member.id}/{nickname}/{joined.astimezone(KST):%Y-%m-%d %H:%M:%S}"
+    if not success:
+        line += " | " + " ".join((reason or "처리 오류").split())[:100]
+    if success and returning:
+        try:
+            previous = datetime.fromisoformat(previous_joined_at).astimezone(KST).strftime("%Y-%m-%d %H:%M:%S")
+        except (ValueError, TypeError):
+            previous = "기록 없음"
+        line += f" | 재입장 · 이전 입장: {previous}"
+    return line
 
 
 def thread_name(member):
@@ -128,7 +143,7 @@ def choose(session, action, values):
         if any(v not in valid for v in values):
             raise ValueError("등록되지 않은 선택지입니다.")
         answers[stage] = values
-        next_stage = {"gender": "year", "year": "interests", "interests": "review"}[stage]
+        next_stage = {"gender": "year", "year": "interests", "interests": "nickname"}[stage]
         if session.get("edit_return") == "review":
             next_stage = "review"
         return answers, next_stage
@@ -331,18 +346,20 @@ class Onboarding:
             await self.sync_roles(member, session, answers, pending["stage"])
         except ValueError as error:
             LOG.warning("Admission role processing failed member=%s: %s", member.id, error)
-            await self.audit(member.guild, session["config"], admission_log(member, False, session.get("joined_at", "")))
+            await self.audit(member.guild, session["config"], admission_log(member, False, session.get("joined_at", ""), reason=str(error)))
             raise
         session.update(answers=answers, stage=pending["stage"], pending=None,
                        revision=session["revision"] + 1)
         if session["stage"] in {"review", "tour", "rejected"}:
             session.pop("edit_return", None)
-        if session["stage"] == "review":
+        if session["stage"] in {"nickname", "review"}:
             session.pop("draft_interests", None)
         await self.save(member, session)
         if session["stage"] in {"tour", "rejected"}:
             await self.audit(member.guild, session["config"],
-                             admission_log(member, session["stage"] == "tour", session.get("joined_at", "")))
+                             admission_log(member, session["stage"] == "tour", session.get("joined_at", ""),
+                                           reason="허용 출생연도 범위 밖", returning=session.get("returning", False),
+                                           previous_joined_at=session.get("previous_joined_at", "")))
 
     def view(self, member_id, session):
         view = discord.ui.View(timeout=None)
@@ -366,10 +383,14 @@ class Onboarding:
         elif stage == "tour":
             view.add_item(discord.ui.Button(label="안내 완료" if session.get("tour_index", 1) == 4 else "다음 채널",
                                            custom_id=prefix + "next", style=discord.ButtonStyle.primary))
+        elif stage == "nickname":
+            view.add_item(discord.ui.Button(label="진행하기", custom_id=prefix + "check_nickname",
+                                           style=discord.ButtonStyle.primary))
         elif stage == "review":
             view.add_item(discord.ui.Button(label="이 정보로 입장하기", custom_id=prefix + "complete",
                                            style=discord.ButtonStyle.success, row=0))
         editable = {"year": ["gender"], "interests": ["gender", "year"],
+                    "nickname": ["gender", "year", "interests"],
                     "review": ["gender", "year", "interests"], "tour": ["gender", "year", "interests"]}
         names = {"gender": "성별", "year": "출생연도", "interests": "관심사"}
         for question in editable.get(stage, []):
@@ -392,6 +413,8 @@ class Onboarding:
             selected = session.get("draft_interests") or []
             names = [session["config"]["questions"]["interests"][key]["label"] for key in selected]
             content += "\n여러 항목을 고른 뒤 아래 **관심사 선택 확인** 버튼을 눌러주세요.\n\n현재 선택: " + (", ".join(names) or "없음")
+        elif stage == "nickname":
+            content = "**서버 닉네임은 한글로만 사용할 수 있어요.**\n영문·숫자·공백·기호 없이 한글 닉네임으로 변경한 뒤 **진행하기**를 눌러주세요. 이미 한글이면 바로 진행할 수 있어요.\n\n현재 서버 닉네임: " + discord.utils.escape_markdown(member.display_name)
         elif stage == "review":
             content = "**선택한 정보를 확인해주세요.**\n"
             for label, question in QUESTIONS.items():
@@ -406,7 +429,7 @@ class Onboarding:
         elif stage == "done":
             content = "안내가 끝났습니다. 즐거운 서버 생활 되세요!\n\n" + "\n".join(
                 f"<#{v['channel_id']}> — {v['description']}" for _, v in sorted(session["config"]["introductions"].items()))
-        if stage in {*LABELS, "review"}:
+        if stage in {*LABELS, "nickname", "review"}:
             content = "환영합니다! 성별 → 출생연도 → 관심사 선택을 마치면 서버 채널을 이용할 수 있어요.\n\n" + content
         message = None
         if session.get("message_id"):
@@ -450,11 +473,14 @@ class Onboarding:
             if session and (is_new_membership(member, session) or missing_completed_role or missing_thread):
                 self.validate(member.guild, config)
                 previous = session
+                rejoined = is_new_membership(member, previous)
                 session = {"stage": "gender", "answers": {},
                            "revision": max(previous["revision"] + 1, int(time.time() * 1000)),
                            "config": copy.deepcopy(config), "thread_id": 0 if missing_thread else previous.get("thread_id", 0),
                            "message_id": 0, "tour_index": 1, "joined_at": joined_at,
-                           "returning": not missing_thread, "cleanup_config": previous.get("cleanup_config") or previous["config"]}
+                           "returning": rejoined or previous.get("returning", False),
+                           "previous_joined_at": previous.get("joined_at", "") if rejoined else previous.get("previous_joined_at", ""),
+                           "cleanup_config": previous.get("cleanup_config") or previous["config"]}
                 # Persist the reset before external calls, so a failed retry never resumes completion.
                 await self.save(member, session)
             if session and session.get("cleanup_config"):
@@ -526,7 +552,7 @@ class Onboarding:
             LOG.exception("Admission start failed guild=%s member=%s", member.guild.id, member.id)
             try:
                 await self.audit(member.guild, await self.config(member.guild.id),
-                                 admission_log(member, False))
+                                 admission_log(member, False, reason="입장 안내 시작 오류 · 권한/설정 확인"))
             except Exception:
                 LOG.exception("Admission start failure could not be reported")
 
@@ -565,7 +591,7 @@ class Onboarding:
                 elif action.startswith("edit_"):
                     target = action.removeprefix("edit_")
                     allowed = {"year": {"gender"}, "interests": {"gender", "year"},
-                               "review": set(LABELS), "tour": set(LABELS)}
+                               "nickname": set(LABELS), "review": set(LABELS), "tour": set(LABELS)}
                     if target not in allowed.get(session["stage"], set()):
                         raise ValueError("현재 단계에서는 해당 항목을 수정할 수 없습니다.")
                     if session["stage"] in {"review", "tour"}:
@@ -588,7 +614,18 @@ class Onboarding:
                     session["pending"] = {"answers": answers, "stage": stage}
                     await self.save(member, session)
                     await self.apply_pending(member, session)
+                elif session["stage"] == "nickname" and action == "check_nickname":
+                    if not korean_nickname(member.display_name):
+                        await self.render(member, session)
+                        raise ValueError("서버 닉네임을 한글로만 변경한 뒤 진행하기를 눌러주세요.")
+                    session.update(stage="review", revision=session["revision"] + 1)
+                    await self.save(member, session)
                 elif session["stage"] == "review" and action == "complete":
+                    if not korean_nickname(member.display_name):
+                        session.update(stage="nickname", revision=session["revision"] + 1)
+                        await self.save(member, session)
+                        await self.render(member, session)
+                        return
                     answers = session.get("answers") or {}
                     desired_ids(session["config"], answers, "tour")  # require all three answers
                     session["pending"] = {"answers": answers, "stage": "tour"}
@@ -607,7 +644,7 @@ class Onboarding:
                     session["pending"] = {"answers": answers, "stage": stage}
                     await self.save(interaction.user, session)
                     await self.apply_pending(interaction.user, session)
-                await self.render(interaction.user, session)
+                await self.render(member, session)
         except ValueError as error:
             await interaction.followup.send(str(error), ephemeral=True)
         except Exception:
@@ -615,7 +652,7 @@ class Onboarding:
             await interaction.followup.send("처리를 완료하지 못했습니다. 진행 내용은 저장되며, 대기 채널에서 이어하기를 눌러 다시 시도할 수 있습니다. 계속 실패하면 서버장에게 문의해주세요.", ephemeral=True)
             try:
                 await self.audit(interaction.guild, await self.config(interaction.guild.id),
-                                 admission_log(interaction.user, False))
+                                 admission_log(interaction.user, False, reason="입장 처리 오류 · 봇 실행 로그 확인"))
             except Exception:
                 LOG.exception("Admission error reporting failed")
 
