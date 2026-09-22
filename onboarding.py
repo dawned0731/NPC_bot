@@ -21,9 +21,10 @@ from firebase_admin import db
 
 LOG = logging.getLogger(__name__)
 NO_PING = discord.AllowedMentions.none()
-QUESTIONS = {"성별": "gender", "출생연도": "year", "관심사": "interests"}
+QUESTIONS = {"성별": "gender", "출생연도": "year", "관심사": "interests", "계절": "season"}
+SEASONS = {"spring": "봄", "summer": "여름", "autumn": "가을", "winter": "겨울"}
 LABELS = {"gender": "성별을 선택해주세요", "year": "출생연도를 선택해주세요",
-          "interests": "관심사를 하나 이상 선택해주세요 (복수 선택 가능)"}
+          "interests": "관심사를 하나 이상 선택해주세요 (복수 선택 가능)", "season": "마음에 드는 계절을 골라주세요."}
 TERMINAL = {"done", "rejected"}
 KST = timezone(timedelta(hours=9))
 
@@ -35,7 +36,12 @@ def membership_stamp(member):
 
 def korean_nickname(name):
     name = unicodedata.normalize("NFC", name)
-    return bool(name) and all("가" <= char <= "힣" for char in name)
+    def allowed(char):
+        kind = unicodedata.category(char)
+        return ("HANGUL" in unicodedata.name(char, "") or char.isdecimal()
+                or kind[0] in {"P", "S"} or kind == "Zs") and not (
+                    kind[0] in {"L", "M"} and "HANGUL" not in unicodedata.name(char, ""))
+    return bool(name.strip()) and all(allowed(char) for char in name)
 
 
 def admission_log(member, success, joined_at="", reason="", returning=False, previous_joined_at=""):
@@ -86,7 +92,8 @@ def default_config():
                            "female": {"label": "여자", "role_id": 0}},
                 "year": {str(y): {"label": f"{str(y)[2:]}년생", "role_id": 0}
                          for y in range(2007, 1989, -1)},
-                "interests": {}}, "introductions": {}}
+                "interests": {}, "season": {key: {"label": label, "role_id": 0}
+                                              for key, label in SEASONS.items()}}, "introductions": {}}
 
 
 def option_items(config, question):
@@ -97,6 +104,8 @@ def option_items(config, question):
             return (0, int(item["order"]), item["label"])
         if question == "gender":
             return (1, {"male": 0, "female": 1}.get(key, 2), item["label"])
+        if question == "season":
+            return (0, list(SEASONS).index(key), item["label"])
         if question == "year":
             digits = "".join(c for c in item["label"] if c.isdigit())
             year = int(digits) if digits else 0
@@ -122,7 +131,8 @@ def desired_ids(config, answers, stage):
     if stage in {"tour", "done"}:
         if set(answers) != set(LABELS) or not all(answers.values()):
             raise ValueError("모든 질문을 완료해야 기본 역할을 지급할 수 있습니다.")
-        result.add(int(config["member_role_id"]))
+        if stage == "done":
+            result.add(int(config["member_role_id"]))
     return result
 
 
@@ -143,7 +153,7 @@ def choose(session, action, values):
         if any(v not in valid for v in values):
             raise ValueError("등록되지 않은 선택지입니다.")
         answers[stage] = values
-        next_stage = {"gender": "year", "year": "interests", "interests": "nickname"}[stage]
+        next_stage = {"gender": "year", "year": "interests", "interests": "nickname", "season": "review"}[stage]
         if session.get("edit_return") == "review":
             next_stage = "review"
         return answers, next_stage
@@ -178,6 +188,7 @@ class Onboarding:
         config = {**default_config(), **raw}
         # Firebase drops empty dictionaries; do not resurrect deleted options.
         config["questions"] = raw.get("questions") or {}
+        config["questions"].setdefault("season", default_config()["questions"]["season"])
         for key in LABELS:
             config["questions"].setdefault(key, {})
         config["introductions"] = raw.get("introductions") or {}
@@ -316,6 +327,8 @@ class Onboarding:
         desired = desired_ids(config, answers, stage)
         # Fetch fresh membership for retries and concurrent gateway events.
         member = await member.guild.fetch_member(member.id)
+        if stage == "done" and not korean_nickname(member.display_name):
+            raise ValueError("서버 닉네임을 한글로 변경한 뒤 안내 완료를 눌러주세요.")
         if not member.guild.me.guild_permissions.manage_roles:
             raise ValueError("봇에게 역할 관리 권한이 없습니다.")
         additions = [self.role(member.guild, rid) for rid in desired]
@@ -329,7 +342,7 @@ class Onboarding:
             await member.remove_roles(role, reason="입장 안내 선택 변경/회수")
         gate = int(config["member_role_id"])
         for role in sorted(additions, key=lambda r: r.id == gate):
-            if role.id == gate and stage in {"tour", "done"}:
+            if role.id == gate and stage == "done":
                 await self.initialize_member(member)
             if role.id not in current:
                 await member.add_roles(role, reason="입장 안내 완료" if role.id == gate else "입장 안내 선택")
@@ -342,6 +355,10 @@ class Onboarding:
         if not pending:
             return
         answers = pending.get("answers") or {}
+        if pending["stage"] in {"tour", "done"} and not answers.get("season"):
+            session["answers"] = answers
+            await self.begin_season(member, session)
+            return
         try:
             await self.sync_roles(member, session, answers, pending["stage"])
         except ValueError as error:
@@ -355,17 +372,41 @@ class Onboarding:
         if session["stage"] in {"nickname", "review"}:
             session.pop("draft_interests", None)
         await self.save(member, session)
-        if session["stage"] in {"tour", "rejected"}:
+        if session["stage"] in {"done", "rejected"}:
             await self.audit(member.guild, session["config"],
-                             admission_log(member, session["stage"] == "tour", session.get("joined_at", ""),
+                             admission_log(member, session["stage"] == "done", session.get("joined_at", ""),
                                            reason="허용 출생연도 범위 밖", returning=session.get("returning", False),
                                            previous_joined_at=session.get("previous_joined_at", "")))
+
+    async def begin_season(self, member, session):
+        if not session["config"]["questions"].get("season") or any(
+                not item.get("role_id") for item in session["config"]["questions"]["season"].values()):
+            config = await self.config(member.guild.id)
+            session["config"]["questions"]["season"] = copy.deepcopy(config["questions"]["season"])
+        options = session["config"]["questions"]["season"]
+        if set(options) != set(SEASONS):
+            raise ValueError("관리자가 봄·여름·가을·겨울 역할을 모두 연결해야 합니다.")
+        for item in options.values():
+            self.role(member.guild, int(item.get("role_id", 0)))
+        role_ids = [int(item.get("role_id", 0)) for entries in session["config"]["questions"].values()
+                    for item in (entries or {}).values()]
+        role_ids.append(int(session["config"]["member_role_id"]))
+        if len(role_ids) != len(set(role_ids)):
+            raise ValueError("계절 역할이 기존 입장 역할과 중복됩니다. 관리자에게 역할 연결 확인을 요청해주세요.")
+        session["pending"] = {"stage": "season", "answers": session.get("answers") or {}}
+        session["tour_index"] = 1
+        await self.save(member, session)
+        await self.apply_pending(member, session)
 
     def view(self, member_id, session):
         view = discord.ui.View(timeout=None)
         stage = session["stage"]
         prefix = f"npcob:{member_id}:{session['revision']}:"
-        if stage in LABELS:
+        if stage == "season":
+            for key, label in SEASONS.items():
+                view.add_item(discord.ui.Button(label=label, custom_id=prefix + "season_" + key,
+                                               style=discord.ButtonStyle.primary, row=0))
+        elif stage in LABELS:
             selected = (session.get("draft_interests") or []) if stage == "interests" else (session.get("answers") or {}).get(stage, [])
             options = [discord.SelectOption(label=item["label"], value=key, default=key in selected)
                        for key, item in option_items(session["config"], stage)]
@@ -387,12 +428,12 @@ class Onboarding:
             view.add_item(discord.ui.Button(label="진행하기", custom_id=prefix + "check_nickname",
                                            style=discord.ButtonStyle.primary))
         elif stage == "review":
-            view.add_item(discord.ui.Button(label="이 정보로 입장하기", custom_id=prefix + "complete",
+            view.add_item(discord.ui.Button(label="채널 안내 시작", custom_id=prefix + "complete",
                                            style=discord.ButtonStyle.success, row=0))
         editable = {"year": ["gender"], "interests": ["gender", "year"],
                     "nickname": ["gender", "year", "interests"],
-                    "review": ["gender", "year", "interests"], "tour": ["gender", "year", "interests"]}
-        names = {"gender": "성별", "year": "출생연도", "interests": "관심사"}
+                    "review": list(LABELS), "tour": list(LABELS)}
+        names = {value: key for key, value in QUESTIONS.items()}
         for question in editable.get(stage, []):
             view.add_item(discord.ui.Button(label=f"{names[question]} 다시 선택", custom_id=prefix + "edit_" + question, row=1))
         return view
@@ -414,18 +455,18 @@ class Onboarding:
             names = [session["config"]["questions"]["interests"][key]["label"] for key in selected]
             content += "\n여러 항목을 고른 뒤 아래 **관심사 선택 확인** 버튼을 눌러주세요.\n\n현재 선택: " + (", ".join(names) or "없음")
         elif stage == "nickname":
-            content = "**서버 닉네임은 한글로만 사용할 수 있어요.**\n영문·숫자·공백·기호 없이 한글 닉네임으로 변경한 뒤 **진행하기**를 눌러주세요. 이미 한글이면 바로 진행할 수 있어요.\n\n현재 서버 닉네임: " + discord.utils.escape_markdown(member.display_name)
+            content = "**서버 닉네임은 한글로만 사용할 수 있어요.**\n한글 닉네임으로 변경한 뒤 **진행하기**를 눌러주세요. 이미 한글이면 바로 진행할 수 있어요.\n\n현재 서버 닉네임: " + discord.utils.escape_markdown(member.display_name)
         elif stage == "review":
             content = "**선택한 정보를 확인해주세요.**\n"
             for label, question in QUESTIONS.items():
                 values = (session.get("answers") or {}).get(question, [])
                 names = [session["config"]["questions"][question][key]["label"] for key in values]
                 content += f"\n{label}: {', '.join(names) or '미선택'}"
-            content += "\n\n잘못 선택했다면 아래에서 다시 선택할 수 있어요. 맞으면 **이 정보로 입장하기**를 눌러주세요."
+            content += "\n\n잘못 선택했다면 아래에서 다시 선택할 수 있어요. 맞으면 **채널 안내 시작**을 눌러주세요."
         elif stage == "tour":
             index = str(session.get("tour_index", 1))
             intro = session["config"]["introductions"][f"slot{index}"]
-            content = f"입장 준비가 끝났어요! 주요 채널을 소개합니다.\n\n({index}/4) <#{intro['channel_id']}>\n{intro['description']}"
+            content = f"주요 채널을 소개합니다. 네 채널을 확인하고 안내 완료를 누르면 서버 채널을 이용할 수 있어요.\n\n({index}/4) <#{intro['channel_id']}>\n{intro['description']}"
         elif stage == "done":
             content = "안내가 끝났습니다. 즐거운 서버 생활 되세요!\n\n" + "\n".join(
                 f"<#{v['channel_id']}> — {v['description']}" for _, v in sorted(session["config"]["introductions"].items()))
@@ -523,6 +564,8 @@ class Onboarding:
                 session["greeted"] = True
                 await self.save(member, session)
             await self.apply_pending(member, session)
+            if session["stage"] == "tour" and not (session.get("answers") or {}).get("season"):
+                await self.begin_season(member, session)
             return await self.render(member, session)
 
     async def on_leave(self, member):
@@ -618,24 +661,43 @@ class Onboarding:
                     if not korean_nickname(member.display_name):
                         await self.render(member, session)
                         raise ValueError("서버 닉네임을 한글로만 변경한 뒤 진행하기를 눌러주세요.")
-                    session.update(stage="review", revision=session["revision"] + 1)
+                    await self.begin_season(member, session)
+                elif session["stage"] == "season" and action.startswith("season_"):
+                    answers, stage = choose(session, "season", [action.removeprefix("season_")])
+                    session["pending"] = {"answers": answers, "stage": stage}
                     await self.save(member, session)
+                    await self.apply_pending(member, session)
                 elif session["stage"] == "review" and action == "complete":
                     if not korean_nickname(member.display_name):
                         session.update(stage="nickname", revision=session["revision"] + 1)
                         await self.save(member, session)
                         await self.render(member, session)
                         return
+                    if not (session.get("answers") or {}).get("season"):
+                        await self.begin_season(member, session)
+                        await self.render(member, session)
+                        return
                     answers = session.get("answers") or {}
-                    desired_ids(session["config"], answers, "tour")  # require all three answers
+                    desired_ids(session["config"], answers, "tour")  # require every role question
                     session["pending"] = {"answers": answers, "stage": "tour"}
                     await self.save(member, session)
                     await self.apply_pending(member, session)
                 elif session["stage"] == "tour" and action == "next":
+                    if not (session.get("answers") or {}).get("season"):
+                        await self.begin_season(member, session)
+                        await self.render(member, session)
+                        return
                     index = session.get("tour_index", 1)
-                    session.update(tour_index=min(4, index + 1), stage="done" if index == 4 else "tour",
-                                   revision=session["revision"] + 1)
-                    await self.save(interaction.user, session)
+                    if index == 4:
+                        if not korean_nickname(member.display_name):
+                            session["pending"] = {"answers": session.get("answers") or {}, "stage": "nickname"}
+                        else:
+                            session["pending"] = {"answers": session.get("answers") or {}, "stage": "done"}
+                        await self.save(member, session)
+                        await self.apply_pending(member, session)
+                    else:
+                        session.update(tour_index=index + 1, revision=session["revision"] + 1)
+                        await self.save(member, session)
                 else:
                     values = data.get("values") or []
                     if session["stage"] == "reject_confirm":
@@ -742,7 +804,7 @@ class _SettingsActions:
     @app_commands.default_permissions(administrator=True)
     @app_commands.checks.has_permissions(administrator=True)
     async def options(self, interaction: discord.Interaction, 작업: Literal["등록", "삭제", "목록"],
-                      질문: Literal["성별", "출생연도", "관심사"],
+                      질문: Literal["성별", "출생연도", "관심사", "계절"],
                       선택지: app_commands.Range[str, 1, 80] | None = None,
                       역할: discord.Role | None = None,
                       순서: int | None = None):
@@ -763,6 +825,8 @@ class _SettingsActions:
                     await interaction.followup.send(text[offset:offset + 1800], ephemeral=True, allowed_mentions=NO_PING)
                 return
             label = (선택지 or "").strip()
+            if question == "season" and (label not in SEASONS.values() or 작업 == "삭제"):
+                raise ValueError("계절은 봄·여름·가을·겨울 고정 항목입니다. 역할 연결만 변경할 수 있습니다.")
             if not label or label == "그 외 나이":
                 raise ValueError("선택지 이름을 입력해주세요. '그 외 나이'는 시스템 고정 항목입니다.")
             key = next((key for key, item in options.items() if item["label"] == label), None)
@@ -786,7 +850,7 @@ class _SettingsActions:
                 if 순서 is not None:
                     item["order"] = 순서
                 options[key or uuid.uuid4().hex] = item
-            if config["enabled"]:
+            if config["enabled"] and question != "season":
                 service.validate(interaction.guild, config)
             await service.save_config(interaction.guild_id, config)
             await interaction.followup.send("선택지를 저장했습니다. 새로 시작하는 신입부터 적용됩니다. 진행 중인 신입에게 적용하려면 /입장재시작을 사용해주세요.", ephemeral=True)
@@ -953,7 +1017,7 @@ class OnboardingCommands(commands.Cog):
     @app_commands.guild_only()
     @app_commands.default_permissions(administrator=True)
     @app_commands.checks.has_permissions(administrator=True)
-    async def link(self, interaction: discord.Interaction, 질문: Literal["성별", "출생연도", "관심사"],
+    async def link(self, interaction: discord.Interaction, 질문: Literal["성별", "출생연도", "관심사", "계절"],
                    선택지: app_commands.Range[str, 1, 80], 역할: discord.Role,
                    순서: app_commands.Range[int, 1, 25] | None = None):
         await self.actions.options.callback(self.actions, interaction, "등록", 질문, 선택지, 역할, 순서)

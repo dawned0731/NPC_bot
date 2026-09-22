@@ -9,7 +9,7 @@ import discord
 from discord.ext import commands
 
 from onboarding import (Onboarding, OnboardingCommands, _SettingsActions, option_items, choose, default_config, thread_name,
-                        desired_ids, install, managed_ids, admission_log)
+                        desired_ids, install, managed_ids, admission_log, korean_nickname)
 
 
 class MemoryStore:
@@ -43,7 +43,9 @@ def configured():
                                       "female": {"label": "여자", "role_id": 2}},
                           "year": {"2007": {"label": "07년생", "role_id": 3}},
                           "interests": {"game": {"label": "게임", "role_id": 4},
-                                        "music": {"label": "음악", "role_id": 5}}},
+                                        "music": {"label": "음악", "role_id": 5}},
+                          "season": {key: {"label": label, "role_id": 10 + i} for i, (key, label) in enumerate(
+                              [('spring', '봄'), ('summer', '여름'), ('autumn', '가을'), ('winter', '겨울')])}},
             "introductions": {f"slot{i}": {"channel_id": 40 + i, "description": f"채널 {i}"}
                               for i in range(1, 5)}}
 
@@ -62,7 +64,9 @@ class SelectionTests(unittest.TestCase):
             state.update(answers=answers, stage=stage)
         self.assertEqual(stage, "nickname")
         self.assertEqual(desired_ids(state["config"], answers, stage), {1, 3, 4, 5})
-        self.assertEqual(desired_ids(state["config"], answers, "tour"), {1, 3, 4, 5, 9})
+        answers['season'] = ['spring']
+        self.assertEqual(desired_ids(state["config"], answers, "tour"), {1, 3, 4, 5, 10})
+        self.assertEqual(desired_ids(state["config"], answers, "done"), {1, 3, 4, 5, 9, 10})
 
     def test_bad_values_and_skipping_stages_rejected(self):
         for action, values in [("year", ["2007"]), ("gender", ["unknown"]),
@@ -98,7 +102,7 @@ class SelectionTests(unittest.TestCase):
 class ServiceTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.store = MemoryStore()
-        self.roles = {i: Role(i) for i in range(10)}
+        self.roles = {i: Role(i) for i in range(14)}
         self.member = MagicMock(spec=discord.Member)
         self.member.id = 100
         self.member.bot = False
@@ -137,15 +141,16 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_basic_role_is_last_and_preserves_unrelated_roles(self):
         answers = {"gender": ["male"], "year": ["2007"], "interests": ["music", "game"]}
-        await self.service.sync_roles(self.member, session(), answers, "tour")
+        answers['season'] = ['spring']
+        await self.service.sync_roles(self.member, session(), answers, "done")
         self.assertEqual(self.operations[-1], ("add", 9))
-        self.assertEqual({r.id for r in self.member.roles}, {0, 1, 3, 4, 5, 8, 9})
+        self.assertEqual({r.id for r in self.member.roles}, {0, 1, 3, 4, 5, 8, 9, 10})
         self.init.assert_awaited_once()
 
     async def test_failure_before_gate_then_reboot_retries_saved_intent(self):
         state = session("interests")
         state["pending"] = {"answers": {"gender": ["male"], "year": ["2007"],
-                                        "interests": ["game"]}, "stage": "tour"}
+                                        "interests": ["game"], "season": ["spring"]}, "stage": "done"}
         await self.service.save(self.member, state)
         self.init.side_effect = RuntimeError("database unavailable")
         with self.assertRaises(RuntimeError):
@@ -156,7 +161,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         rebooted = Onboarding(self.bot, AsyncMock(), self.store)
         rebooted.audit = AsyncMock()
         await rebooted.apply_pending(self.member, saved)
-        self.assertEqual((await rebooted.session(200, 100))["stage"], "tour")
+        self.assertEqual((await rebooted.session(200, 100))["stage"], "done")
         self.assertIn(9, {r.id for r in self.member.roles})
         self.assertEqual(self.operations.count(("add", 1)), 1)
 
@@ -240,12 +245,15 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_four_channel_tour_ends_only_after_four_clicks(self):
         state = session("tour")
+        state['answers'] = {'gender': ['male'], 'year': ['2007'], 'interests': ['game'], 'season': ['spring']}
         await self.service.save(self.member, state)
         for rev in range(1, 5):
             await self.service.on_interaction(self.interaction(f"npcob:100:{rev}:next"))
             saved = await self.service.session(200, 100)
             self.assertEqual(saved["stage"], "done" if rev == 4 else "tour")
-        self.member.add_roles.assert_not_awaited()
+            self.assertEqual(9 in {r.id for r in self.member.roles}, rev == 4)
+        self.assertEqual(self.operations[-1], ('add', 9))
+        self.service.audit.assert_awaited_once()
 
     async def test_admin_role_mapping_and_duplicate_rejection(self):
         config = configured()
@@ -267,7 +275,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_firebase_empty_config_collections_do_not_restore_deleted_options(self):
         await self.store.put("config/200", {"enabled": False, "member_role_id": 9})
         config = await self.service.config(200)
-        self.assertEqual(config["questions"], {"gender": {}, "year": {}, "interests": {}})
+        self.assertEqual(config["questions"], {"gender": {}, "year": {}, "interests": {}, 'season': default_config()['questions']['season']})
         self.assertEqual(config["introductions"], {})
 
     async def test_lobby_and_personal_thread_excluded_from_xp(self):
@@ -359,11 +367,12 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.member.display_name = '새/회원\n이름'
         self.assertEqual(admission_log(self.member, True), '⭕ 100/새·회원 이름/2026-09-22 01:30:00')
         self.assertEqual(admission_log(self.member, False), '❌ 100/새·회원 이름/2026-09-22 01:30:00 | 처리 오류')
-        for stage in ('tour', 'rejected'):
+        self.member.display_name = '새/회원 이름'
+        for stage in ('done', 'rejected'):
             state = session()
-            state['pending'] = {'stage': stage, 'answers': {'gender': ['male'], 'year': ['2007'], 'interests': ['game']}}
+            state['pending'] = {'stage': stage, 'answers': {'gender': ['male'], 'year': ['2007'], 'interests': ['game'], 'season': ['spring']}}
             await self.service.apply_pending(self.member, state)
-            self.assertEqual(self.service.audit.await_args.args[2], admission_log(self.member, stage == 'tour', reason='허용 출생연도 범위 밖'))
+            self.assertEqual(self.service.audit.await_args.args[2], admission_log(self.member, stage == 'done', reason='허용 출생연도 범위 밖'))
 
     async def test_duplicate_starts_create_one_private_thread_and_add_owner(self):
         thread = self.private_thread()
@@ -558,10 +567,12 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(9, {role.id for role in self.member.roles})
         confirm.followup.send.assert_not_awaited()
         await self.service.on_interaction(self.interaction('npcob:100:2:check_nickname'))
+        self.assertEqual((await self.service.session(200, 100))['stage'], 'season')
+        await self.service.on_interaction(self.interaction('npcob:100:3:season_spring'))
         self.assertEqual((await self.service.session(200, 100))['stage'], 'review')
-        await self.service.on_interaction(self.interaction('npcob:100:3:complete'))
+        await self.service.on_interaction(self.interaction('npcob:100:4:complete'))
         self.assertEqual((await self.service.session(200, 100))['stage'], 'tour')
-        self.assertIn(9, {role.id for role in self.member.roles})
+        self.assertNotIn(9, {role.id for role in self.member.roles})
 
     async def test_draft_can_change_clear_and_survives_process_restart(self):
         state = session('interests')
@@ -589,7 +600,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         state = session('nickname')
         state['answers'] = {'gender': ['male'], 'year': ['2007'], 'interests': ['game']}
         await self.service.save(self.member, state)
-        for name in ('Player', '한글1', '한 글', '한글!', ''):
+        for name in ('Player', '한글a', '日本語', '中文', 'русский', ''):
             self.member.display_name = name
             await self.service.on_interaction(self.interaction('npcob:100:1:check_nickname'))
             self.assertEqual((await self.service.session(200, 100))['stage'], 'nickname')
@@ -599,7 +610,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.member.display_name = '새벽녘'
         click = self.interaction('npcob:100:1:check_nickname')
         await reboot.on_interaction(click)
-        self.assertEqual((await reboot.session(200, 100))['stage'], 'review')
+        self.assertEqual((await reboot.session(200, 100))['stage'], 'season')
         click.followup.send.assert_not_awaited()
 
     async def test_final_confirmation_rechecks_nickname(self):
@@ -611,6 +622,63 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.service.session(200, 100))['stage'], 'nickname')
         self.assertNotIn(9, {r.id for r in self.member.roles})
 
+    async def test_relaxed_nickname_policy_excludes_foreign_letters(self):
+        for name in ('새벽녘', '새벽 123 !', 'ㄱㄴㅎ', '123', '봄★', '가을_겨울'):
+            self.assertTrue(korean_nickname(name), name)
+        for name in ('abc', '한글A', '中文', '日本語', 'русский', 'é', '한글\n', '   '):
+            self.assertFalse(korean_nickname(name), name)
+
+    async def test_season_has_four_buttons_and_changes_existing_role(self):
+        state = session('season')
+        state['answers'] = {'gender': ['male'], 'year': ['2007'], 'interests': ['game']}
+        view = self.service.view(100, state)
+        self.assertEqual([item.label for item in view.children], ['봄', '여름', '가을', '겨울'])
+        self.assertTrue(all(isinstance(item, discord.ui.Button) for item in view.children))
+        await self.service.save(self.member, state)
+        await self.service.on_interaction(self.interaction('npcob:100:1:season_spring'))
+        self.assertIn(10, {r.id for r in self.member.roles})
+        await self.service.on_interaction(self.interaction('npcob:100:2:edit_season'))
+        await self.service.on_interaction(self.interaction('npcob:100:3:season_winter'))
+        self.assertIn(13, {r.id for r in self.member.roles})
+        self.assertNotIn(10, {r.id for r in self.member.roles})
+        self.assertNotIn(9, {r.id for r in self.member.roles})
+
+    async def test_season_mapping_can_be_configured_one_at_a_time_while_enabled(self):
+        config = configured()
+        config['questions'].pop('season')
+        await self.service.save_config(200, config)
+        cog = _SettingsActions(self.service)
+        for index, label in enumerate(('봄', '여름', '가을', '겨울')):
+            await cog.options.callback(cog, self.interaction(), '등록', '계절', label, self.roles[10 + index])
+        saved = await self.service.config(200)
+        self.assertEqual(saved['questions']['season'], configured()['questions']['season'])
+        with self.assertRaises(ValueError):
+            await cog.options.callback(cog, self.interaction(), '삭제', '계절', '봄')
+
+    async def test_legacy_tour_routes_through_season_without_granting_gate(self):
+        state = session('tour')
+        state['config']['questions'].pop('season')
+        state['answers'] = {'gender': ['male'], 'year': ['2007'], 'interests': ['game']}
+        state['tour_index'] = 4
+        self.member.roles.append(self.roles[9])
+        await self.service.save(self.member, state)
+        await self.service.on_interaction(self.interaction('npcob:100:1:next'))
+        saved = await self.service.session(200, 100)
+        self.assertEqual(saved['stage'], 'season')
+        self.assertEqual(saved['tour_index'], 1)
+        self.assertNotIn(9, {r.id for r in self.member.roles})
+        self.service.audit.assert_not_awaited()
+
+    async def test_duplicate_final_click_grants_gate_and_logs_once(self):
+        state = session('tour')
+        state['tour_index'] = 4
+        state['answers'] = {'gender': ['male'], 'year': ['2007'], 'interests': ['game'], 'season': ['winter']}
+        await self.service.save(self.member, state)
+        await asyncio.gather(self.service.on_interaction(self.interaction('npcob:100:1:next')),
+                             self.service.on_interaction(self.interaction('npcob:100:1:next')))
+        self.assertEqual(self.operations.count(('add', 9)), 1)
+        self.service.audit.assert_awaited_once()
+
     async def test_returning_success_log_keeps_previous_join_date(self):
         old = session('done')
         old['joined_at'] = '2026-09-01T00:00:00+00:00'
@@ -621,7 +689,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         await self.service.start(self.member)
         state = await self.service.session(200, 100)
         self.assertEqual(state['previous_joined_at'], old['joined_at'])
-        state['pending'] = {'stage': 'tour', 'answers': {'gender': ['male'], 'year': ['2007'], 'interests': ['game']}}
+        state['pending'] = {'stage': 'done', 'answers': {'gender': ['male'], 'year': ['2007'], 'interests': ['game'], 'season': ['spring']}}
         await self.service.apply_pending(self.member, state)
         self.assertIn('| 재입장 · 이전 입장: 2026-09-01 09:00:00', self.service.audit.await_args.args[2])
 
