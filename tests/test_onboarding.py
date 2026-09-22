@@ -1,13 +1,14 @@
 import asyncio
 import copy
 import unittest
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import discord
 from discord.ext import commands
 
-from onboarding import (Onboarding, OnboardingCommands, _SettingsActions, option_items, choose, default_config,
+from onboarding import (Onboarding, OnboardingCommands, _SettingsActions, option_items, choose, default_config, thread_name,
                         desired_ids, install, managed_ids)
 
 
@@ -59,7 +60,9 @@ class SelectionTests(unittest.TestCase):
                                ("interests", ["game", "music"])]:
             answers, stage = choose(state, action, values)
             state.update(answers=answers, stage=stage)
-        self.assertEqual(desired_ids(state["config"], answers, stage), {1, 3, 4, 5, 9})
+        self.assertEqual(stage, "review")
+        self.assertEqual(desired_ids(state["config"], answers, stage), {1, 3, 4, 5})
+        self.assertEqual(desired_ids(state["config"], answers, "tour"), {1, 3, 4, 5, 9})
 
     def test_bad_values_and_skipping_stages_rejected(self):
         for action, values in [("year", ["2007"]), ("gender", ["unknown"]),
@@ -101,6 +104,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.member.joined_at = None
         self.member.roles = [self.roles[0], self.roles[8]]  # unrelated role
         self.member.mention = "<@100>"
+        self.member.display_name = "신입"
         self.guild = MagicMock(spec=discord.Guild)
         self.guild.id = 200
         self.guild.owner_id = 300
@@ -270,6 +274,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await self.service.excludes_message(message, configured()))
         thread = MagicMock(spec=discord.Thread)
         thread.id = 50
+        thread.name = thread_name(self.member)
         message.channel = thread
         self.assertTrue(await self.service.excludes_message(message, configured()))
         thread.id = 99
@@ -296,6 +301,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
     def private_thread(self):
         thread = MagicMock(spec=discord.Thread)
         thread.id = 50
+        thread.name = thread_name(self.member)
         thread.type = discord.ChannelType.private_thread
         thread.archived = False
         thread.locked = False
@@ -350,6 +356,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         await self.service.save(self.member, old)
         thread = self.private_thread()
         self.bot.fetch_channel = AsyncMock(return_value=thread)
+        self.bot.get_channel.return_value = thread
         lobby = MagicMock(spec=discord.TextChannel)
         lobby.create_thread = AsyncMock(return_value=thread)
         self.guild.get_channel.return_value = lobby
@@ -460,6 +467,164 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(saved['questions']['interests']['music']['order'], 1)
         self.assertEqual(saved['lobby_id'], config['lobby_id'])
         self.assertEqual(saved['introductions'], config['introductions'])
+
+    async def test_thread_name_uses_user_nickname_and_korean_join_date(self):
+        self.member.joined_at = datetime(2026, 9, 21, 16, 0, tzinfo=timezone.utc)
+        self.member.display_name = '가을'
+        self.assertEqual(thread_name(self.member), '입장 : 100/가을/2026-09-22')
+        self.member.display_name = '긴이름/' * 100
+        name = thread_name(self.member)
+        self.assertLessEqual(len(name), 100)
+        self.assertEqual(name.count('/'), 2)
+        self.assertTrue(name.endswith('/2026-09-22'))
+
+    async def test_normal_selection_silently_updates_existing_message(self):
+        await self.service.save(self.member, session())
+        interaction = self.interaction()
+        await self.service.on_interaction(interaction)
+        interaction.response.defer.assert_awaited_once_with(ephemeral=False, thinking=False)
+        interaction.followup.send.assert_not_awaited()
+        self.service.render.assert_awaited_once()
+
+    async def test_interests_are_draft_until_confirmed_and_gate_waits_for_review(self):
+        state = session('interests')
+        state['answers'] = {'gender': ['male'], 'year': ['2007']}
+        await self.service.save(self.member, state)
+        interaction = self.interaction('npcob:100:1:interests', ['game', 'music'])
+        await self.service.on_interaction(interaction)
+        saved = await self.service.session(200, 100)
+        self.assertEqual(saved['stage'], 'interests')
+        self.assertEqual(saved['draft_interests'], ['game', 'music'])
+        self.member.add_roles.assert_not_awaited()
+        interaction.followup.send.assert_not_awaited()
+        confirm = self.interaction('npcob:100:1:confirm_interests')
+        await self.service.on_interaction(confirm)
+        saved = await self.service.session(200, 100)
+        self.assertEqual(saved['stage'], 'review')
+        self.assertEqual(saved['answers']['interests'], ['game', 'music'])
+        self.assertNotIn(9, {role.id for role in self.member.roles})
+        confirm.followup.send.assert_not_awaited()
+        await self.service.on_interaction(self.interaction('npcob:100:2:complete'))
+        self.assertEqual((await self.service.session(200, 100))['stage'], 'tour')
+        self.assertIn(9, {role.id for role in self.member.roles})
+
+    async def test_draft_can_change_clear_and_survives_process_restart(self):
+        state = session('interests')
+        state['answers'] = {'gender': ['male'], 'year': ['2007']}
+        await self.service.save(self.member, state)
+        await self.service.on_interaction(self.interaction('npcob:100:1:interests', ['game']))
+        await self.service.on_interaction(self.interaction('npcob:100:1:interests', ['music']))
+        reboot = Onboarding(self.bot, self.init, self.store)
+        reboot.render = AsyncMock()
+        reboot.audit = AsyncMock()
+        saved = await reboot.session(200, 100)
+        view = reboot.view(100, saved)
+        select = view.children[0]
+        self.assertEqual([option.value for option in select.options if option.default], ['music'])
+        self.assertFalse(next(item for item in view.children if item.custom_id.endswith('confirm_interests')).disabled)
+        empty = self.interaction('npcob:100:1:interests')
+        empty.data['values'] = []
+        await reboot.on_interaction(empty)
+        saved = await reboot.session(200, 100)
+        self.assertTrue(next(item for item in reboot.view(100, saved).children if item.custom_id.endswith('confirm_interests')).disabled)
+        await reboot.on_interaction(self.interaction('npcob:100:1:confirm_interests'))
+        self.assertEqual((await reboot.session(200, 100))['stage'], 'interests')
+
+    async def test_edit_gender_from_review_replaces_role_and_keeps_other_answers(self):
+        state = session('review')
+        state['answers'] = {'gender': ['male'], 'year': ['2007'], 'interests': ['game']}
+        self.member.roles += [self.roles[1], self.roles[3], self.roles[4]]
+        await self.service.save(self.member, state)
+        await self.service.on_interaction(self.interaction('npcob:100:1:edit_gender'))
+        await self.service.on_interaction(self.interaction('npcob:100:2:gender', ['female']))
+        saved = await self.service.session(200, 100)
+        self.assertEqual(saved['stage'], 'review')
+        self.assertEqual(saved['answers'], {'gender': ['female'], 'year': ['2007'], 'interests': ['game']})
+        self.assertEqual({r.id for r in self.member.roles}, {0, 2, 3, 4, 8})
+
+    async def test_edit_year_from_tour_revokes_access_until_confirmed_again(self):
+        state = session('tour')
+        state['answers'] = {'gender': ['male'], 'year': ['2007'], 'interests': ['game']}
+        self.member.roles += [self.roles[1], self.roles[3], self.roles[4], self.roles[9]]
+        await self.service.save(self.member, state)
+        await self.service.on_interaction(self.interaction('npcob:100:1:edit_year'))
+        self.assertNotIn(9, {r.id for r in self.member.roles})
+        await self.service.on_interaction(self.interaction('npcob:100:2:year', ['outside']))
+        self.assertEqual((await self.service.session(200, 100))['stage'], 'reject_confirm')
+        await self.service.on_interaction(self.interaction('npcob:100:3:back'))
+        await self.service.on_interaction(self.interaction('npcob:100:4:year', ['2007']))
+        self.assertEqual((await self.service.session(200, 100))['stage'], 'review')
+        self.assertNotIn(9, {r.id for r in self.member.roles})
+
+    async def test_edit_interest_replaces_confirmed_roles_only_after_confirm(self):
+        state = session('review')
+        state['answers'] = {'gender': ['male'], 'year': ['2007'], 'interests': ['game']}
+        self.member.roles += [self.roles[1], self.roles[3], self.roles[4]]
+        await self.service.save(self.member, state)
+        await self.service.on_interaction(self.interaction('npcob:100:1:edit_interests'))
+        await self.service.on_interaction(self.interaction('npcob:100:2:interests', ['music']))
+        self.assertIn(4, {r.id for r in self.member.roles})
+        await self.service.on_interaction(self.interaction('npcob:100:2:confirm_interests'))
+        self.assertEqual({r.id for r in self.member.roles}, {0, 1, 3, 5, 8})
+
+    async def test_completed_rejoin_reuses_thread_and_greets_without_old_answers(self):
+        old = session('done')
+        old['joined_at'] = '2026-09-20T00:00:00+00:00'
+        old['answers'] = {'gender': ['male'], 'year': ['2007'], 'interests': ['game']}
+        await self.service.save(self.member, old)
+        self.member.joined_at = datetime(2026, 9, 22, tzinfo=timezone.utc)
+        # Also remove roles restored by another integration on rejoin.
+        self.member.roles += [self.roles[1], self.roles[9]]
+        thread = self.private_thread()
+        thread.archived = thread.locked = True
+        self.bot.get_channel.return_value = thread
+        self.service.validate = MagicMock()
+        await self.service.start(self.member)
+        saved = await self.service.session(200, 100)
+        self.assertEqual(saved['thread_id'], old['thread_id'])
+        self.assertEqual(saved['stage'], 'gender')
+        self.assertFalse(saved['answers'])
+        self.assertFalse(saved['message_id'])
+        self.assertGreater(saved['revision'], old['revision'])
+        self.assertEqual({r.id for r in self.member.roles}, {0, 8})
+        self.assertIn('이전에 들어오신 기록', thread.send.await_args.args[0])
+        thread.edit.assert_any_await(archived=False, locked=False)
+        self.guild.get_channel.assert_not_called()
+        await self.service.start(self.member)
+        thread.send.assert_awaited_once()
+
+    async def test_start_fetches_membership_instead_of_component_payload(self):
+        old = session('year')
+        old['joined_at'] = '2026-09-22T00:00:00+00:00'
+        old['greeted'] = True
+        await self.service.save(self.member, old)
+        stale = MagicMock(spec=discord.Member)
+        stale.id, stale.bot, stale.guild, stale.joined_at = 100, False, self.guild, None
+        self.member.joined_at = datetime(2026, 9, 22, tzinfo=timezone.utc)
+        thread = self.private_thread()
+        self.bot.get_channel.return_value = thread
+        await self.service.start(stale)
+        self.assertEqual((await self.service.session(200, 100))['stage'], 'year')
+        thread.send.assert_not_awaited()
+
+    async def test_leave_marker_restarts_old_session_even_without_timestamp(self):
+        old = session('rejected')
+        await self.service.save(self.member, old)
+        await self.service.on_leave(self.member)
+        self.assertTrue((await self.service.session(200, 100))['left_at'])
+        self.service.validate = MagicMock()
+        self.bot.get_channel.return_value = self.private_thread()
+        await self.service.start(self.member)
+        saved = await self.service.session(200, 100)
+        self.assertEqual(saved['stage'], 'gender')
+        self.assertFalse(saved.get('left_at'))
+
+    async def test_departed_member_cannot_submit_old_question(self):
+        old = session('gender')
+        old['left_at'] = 1
+        await self.service.save(self.member, old)
+        await self.service.on_interaction(self.interaction())
+        self.member.add_roles.assert_not_awaited()
 
 
 if __name__ == "__main__":

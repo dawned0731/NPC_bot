@@ -10,6 +10,7 @@ import copy
 import logging
 import time
 import uuid
+from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 import discord
@@ -23,6 +24,32 @@ QUESTIONS = {"성별": "gender", "출생연도": "year", "관심사": "interests
 LABELS = {"gender": "성별을 선택해주세요", "year": "출생연도를 선택해주세요",
           "interests": "관심사를 하나 이상 선택해주세요 (복수 선택 가능)"}
 TERMINAL = {"done", "rejected"}
+KST = timezone(timedelta(hours=9))
+
+
+def membership_stamp(member):
+    joined = member.joined_at
+    return joined.astimezone(timezone.utc).isoformat() if joined else ""
+
+
+def thread_name(member):
+    joined = member.joined_at or datetime.now(timezone.utc)
+    day = joined.astimezone(KST).strftime("%Y-%m-%d")
+    prefix, suffix = f"입장 : {member.id}/", f"/{day}"
+    nickname = " ".join(member.display_name.replace("/", "·").split()) or str(member.id)
+    return prefix + nickname[:100 - len(prefix) - len(suffix)] + suffix
+
+
+def is_new_membership(member, session):
+    current, previous = membership_stamp(member), session.get("joined_at", "")
+    if session.get("left_at"):
+        return True
+    if current and previous:
+        try:
+            return datetime.fromisoformat(current) != datetime.fromisoformat(previous)
+        except ValueError:
+            return current != previous
+    return False
 
 
 def default_config():
@@ -89,7 +116,10 @@ def choose(session, action, values):
         if any(v not in valid for v in values):
             raise ValueError("등록되지 않은 선택지입니다.")
         answers[stage] = values
-        return answers, {"gender": "year", "year": "interests", "interests": "tour"}[stage]
+        next_stage = {"gender": "year", "year": "interests", "interests": "review"}[stage]
+        if session.get("edit_return") == "review":
+            next_stage = "review"
+        return answers, next_stage
     if stage == "reject_confirm":
         if values == ["back"]:
             return answers, "year"
@@ -294,6 +324,10 @@ class Onboarding:
             raise
         session.update(answers=answers, stage=pending["stage"], pending=None,
                        revision=session["revision"] + 1)
+        if session["stage"] in {"review", "tour", "rejected"}:
+            session.pop("edit_return", None)
+        if session["stage"] == "review":
+            session.pop("draft_interests", None)
         await self.save(member, session)
         if session["stage"] in {"tour", "rejected"}:
             details = []
@@ -307,13 +341,17 @@ class Onboarding:
         stage = session["stage"]
         prefix = f"npcob:{member_id}:{session['revision']}:"
         if stage in LABELS:
-            options = [discord.SelectOption(label=item["label"], value=key)
+            selected = (session.get("draft_interests") or []) if stage == "interests" else (session.get("answers") or {}).get(stage, [])
+            options = [discord.SelectOption(label=item["label"], value=key, default=key in selected)
                        for key, item in option_items(session["config"], stage)]
             if stage == "year":
                 options.append(discord.SelectOption(label="그 외 나이", value="outside"))
             view.add_item(discord.ui.Select(custom_id=prefix + stage, placeholder=LABELS[stage],
-                                           options=options, min_values=1,
+                                           options=options, min_values=0 if stage == "interests" else 1, row=0,
                                            max_values=len(options) if stage == "interests" else 1))
+            if stage == "interests":
+                view.add_item(discord.ui.Button(label="관심사 선택 확인", custom_id=prefix + "confirm_interests",
+                                               style=discord.ButtonStyle.primary, disabled=not selected, row=1))
         elif stage == "reject_confirm":
             view.add_item(discord.ui.Button(label="다시 선택", custom_id=prefix + "back"))
             view.add_item(discord.ui.Button(label="확인", style=discord.ButtonStyle.danger,
@@ -321,6 +359,14 @@ class Onboarding:
         elif stage == "tour":
             view.add_item(discord.ui.Button(label="안내 완료" if session.get("tour_index", 1) == 4 else "다음 채널",
                                            custom_id=prefix + "next", style=discord.ButtonStyle.primary))
+        elif stage == "review":
+            view.add_item(discord.ui.Button(label="이 정보로 입장하기", custom_id=prefix + "complete",
+                                           style=discord.ButtonStyle.success, row=0))
+        editable = {"year": ["gender"], "interests": ["gender", "year"],
+                    "review": ["gender", "year", "interests"], "tour": ["gender", "year", "interests"]}
+        names = {"gender": "성별", "year": "출생연도", "interests": "관심사"}
+        for question in editable.get(stage, []):
+            view.add_item(discord.ui.Button(label=f"{names[question]} 다시 선택", custom_id=prefix + "edit_" + question, row=1))
         return view
 
     async def render(self, member, session):
@@ -337,6 +383,17 @@ class Onboarding:
             content = "허용 출생연도에 해당하지 않으면 입장할 수 없습니다. 확인하면 입장 절차에서 관리하는 역할을 회수합니다. 잘못 눌렀다면 다시 선택해주세요."
         elif stage == "rejected":
             content = "입장 가능한 출생연도 범위에 해당하지 않아 입장이 제한되었습니다. 입장 관련 역할을 회수했습니다. 잘못 선택했다면 서버장에게 문의해주세요."
+        elif stage == "interests":
+            selected = session.get("draft_interests") or []
+            names = [session["config"]["questions"]["interests"][key]["label"] for key in selected]
+            content += "\n\n여러 항목을 고른 뒤 아래 **관심사 선택 확인** 버튼을 눌러주세요.\n현재 선택: " + (", ".join(names) or "없음")
+        elif stage == "review":
+            content = "**선택한 정보를 확인해주세요.**\n"
+            for label, question in QUESTIONS.items():
+                values = (session.get("answers") or {}).get(question, [])
+                names = [session["config"]["questions"][question][key]["label"] for key in values]
+                content += f"\n{label}: {', '.join(names) or '미선택'}"
+            content += "\n\n잘못 선택했다면 아래에서 다시 선택할 수 있어요. 맞으면 **이 정보로 입장하기**를 눌러주세요."
         elif stage == "tour":
             index = str(session.get("tour_index", 1))
             intro = session["config"]["introductions"][f"slot{index}"]
@@ -365,21 +422,30 @@ class Onboarding:
         if member.bot:
             return None
         async with self.lock(member.guild.id, member.id):
+            # Component payloads can omit joined_at; always use Discord's latest member.
+            member = await member.guild.fetch_member(member.id)
             config = await self.config(member.guild.id)
             if not config["enabled"]:
                 raise ValueError("현재 봇 입장 안내가 꺼져 있습니다.")
             session = await self.session(member.guild.id, member.id)
-            joined_at = member.joined_at.isoformat() if member.joined_at else ""
-            if session and session.get("joined_at", "") != joined_at:
-                # Also handles a rejoin while the bot was offline.
-                if session.get("thread_id"):
-                    try:
-                        old_thread = await self.bot.fetch_channel(session["thread_id"])
-                        await old_thread.edit(locked=True, archived=True)
-                    except discord.NotFound:
-                        pass
-                await self.store.put(f"sessions/{member.guild.id}/{member.id}", None)
-                session = None
+            joined_at = membership_stamp(member)
+            # Recover records created by older versions even if their join timestamp was missing.
+            missing_completed_role = session and session["stage"] == "done" and not any(
+                r.id == int(session["config"]["member_role_id"]) for r in member.roles)
+            if session and (is_new_membership(member, session) or missing_completed_role):
+                self.validate(member.guild, config)
+                previous = session
+                session = {"stage": "gender", "answers": {},
+                           "revision": max(previous["revision"] + 1, int(time.time() * 1000)),
+                           "config": copy.deepcopy(config), "thread_id": previous.get("thread_id", 0),
+                           "message_id": 0, "tour_index": 1, "joined_at": joined_at,
+                           "returning": True, "cleanup_config": previous.get("cleanup_config") or previous["config"]}
+                # Persist the reset before external calls, so a failed retry never resumes completion.
+                await self.save(member, session)
+            if session and session.get("cleanup_config"):
+                await self.sync_roles(member, {"config": session["cleanup_config"]}, {}, "rejected")
+                session.pop("cleanup_config", None)
+                await self.save(member, session)
             if session and session["stage"] in TERMINAL:
                 if session.get("pending"):
                     await self.apply_pending(member, session)
@@ -403,22 +469,42 @@ class Onboarding:
                 lobby = member.guild.get_channel(int(session["config"]["lobby_id"]))
                 if not isinstance(lobby, discord.TextChannel):
                     raise ValueError("대기 채널이 없습니다. 관리자에게 문의해주세요.")
-                thread = await lobby.create_thread(name=f"입장 안내-{member.id}",
+                thread = await lobby.create_thread(name=thread_name(member),
                                                    type=discord.ChannelType.private_thread,
                                                    invitable=False, auto_archive_duration=1440)
                 session.update(thread_id=thread.id, message_id=0)
                 await self.save(member, session)
             if thread.archived or thread.locked:
                 await thread.edit(archived=False, locked=False)
+            if thread.name != thread_name(member):
+                await thread.edit(name=thread_name(member))
             await thread.add_user(member)
             await thread.add_user(discord.Object(id=member.guild.owner_id))
             if not session.get("greeted"):
-                await thread.send(f"{member.mention} 님, 이곳에서 입장 안내를 진행해주세요.",
+                greeting = ("이전에 들어오신 기록이 확인돼요. 다시 만나 반갑습니다! 새로운 마음으로 다시 시작할 수 있도록 정보를 한 번 더 여쭤볼게요."
+                            if session.get("returning") else "이곳에서 입장 안내를 진행해주세요.")
+                await thread.send(f"{member.mention} 님, {greeting}",
                                   allowed_mentions=discord.AllowedMentions(users=[member], roles=False, everyone=False))
                 session["greeted"] = True
                 await self.save(member, session)
             await self.apply_pending(member, session)
             return await self.render(member, session)
+
+    async def on_leave(self, member):
+        if member.bot:
+            return
+        try:
+            async with self.lock(member.guild.id, member.id):
+                session = await self.session(member.guild.id, member.id)
+                if session:
+                    # A delayed leave event must not mark a newer admission as departed.
+                    stamp = membership_stamp(member)
+                    if stamp and session.get("joined_at") and is_new_membership(member, session):
+                        return
+                    session["left_at"] = int(time.time())
+                    await self.save(member, session)
+        except Exception:
+            LOG.exception("Could not record departure guild=%s member=%s", member.guild.id, member.id)
 
     async def on_join(self, member):
         if member.bot:
@@ -440,7 +526,9 @@ class Onboarding:
         custom_id = data.get("custom_id", "")
         if interaction.type != discord.InteractionType.component or not custom_id.startswith("npcob:"):
             return
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        is_start = custom_id == "npcob:start"
+        # Component updates acknowledge silently; only the lobby needs a private thread link.
+        await interaction.response.defer(ephemeral=is_start, thinking=is_start)
         try:
             if not interaction.guild or not isinstance(interaction.user, discord.Member):
                 raise ValueError("서버에서 사용해주세요.")
@@ -457,10 +545,46 @@ class Onboarding:
                 session = await self.session(interaction.guild.id, interaction.user.id)
                 if not session or interaction.channel_id != session["thread_id"]:
                     raise ValueError("현재 진행 중인 개인 스레드에서 사용해주세요.")
+                member = await interaction.guild.fetch_member(interaction.user.id)
+                if is_new_membership(member, session):
+                    raise ValueError("재입장한 회원입니다. 대기 채널의 시작 / 이어하기 버튼을 눌러 새 안내를 시작해주세요.")
                 if int(revision) != session["revision"] or session["stage"] in TERMINAL:
-                    raise ValueError("이미 처리된 버튼입니다. 대기 채널에서 이어하기를 눌러주세요.")
+                    # Duplicate/old clicks are harmless and must not clutter the thread.
+                    return
                 if session.get("pending"):
                     await self.apply_pending(interaction.user, session)
+                elif action.startswith("edit_"):
+                    target = action.removeprefix("edit_")
+                    allowed = {"year": {"gender"}, "interests": {"gender", "year"},
+                               "review": set(LABELS), "tour": set(LABELS)}
+                    if target not in allowed.get(session["stage"], set()):
+                        raise ValueError("현재 단계에서는 해당 항목을 수정할 수 없습니다.")
+                    if session["stage"] in {"review", "tour"}:
+                        session["edit_return"] = "review"
+                    if target == "interests":
+                        session["draft_interests"] = (session.get("answers") or {}).get("interests", [])
+                    session["tour_index"] = 1
+                    session["pending"] = {"answers": session.get("answers") or {}, "stage": target}
+                    await self.save(member, session)
+                    await self.apply_pending(member, session)
+                elif session["stage"] == "interests" and action == "interests":
+                    values = data.get("values") or []
+                    if values:
+                        choose(session, "interests", values)  # validate before persisting a draft
+                    session["draft_interests"] = values
+                    # Keep this revision until confirmation, allowing repeated draft selection.
+                    await self.save(member, session)
+                elif session["stage"] == "interests" and action == "confirm_interests":
+                    answers, stage = choose(session, "interests", session.get("draft_interests") or [])
+                    session["pending"] = {"answers": answers, "stage": stage}
+                    await self.save(member, session)
+                    await self.apply_pending(member, session)
+                elif session["stage"] == "review" and action == "complete":
+                    answers = session.get("answers") or {}
+                    desired_ids(session["config"], answers, "tour")  # require all three answers
+                    session["pending"] = {"answers": answers, "stage": "tour"}
+                    await self.save(member, session)
+                    await self.apply_pending(member, session)
                 elif session["stage"] == "tour" and action == "next":
                     index = session.get("tour_index", 1)
                     session.update(tour_index=min(4, index + 1), stage="done" if index == 4 else "tour",
@@ -475,7 +599,6 @@ class Onboarding:
                     await self.save(interaction.user, session)
                     await self.apply_pending(interaction.user, session)
                 await self.render(interaction.user, session)
-            await interaction.followup.send("반영했습니다. 스레드의 안내를 확인해주세요.", ephemeral=True)
         except ValueError as error:
             await interaction.followup.send(str(error), ephemeral=True)
         except Exception:
@@ -864,6 +987,7 @@ class OnboardingCommands(commands.Cog):
 async def install(bot, initialize_member):
     service = Onboarding(bot, initialize_member)
     bot.add_listener(service.on_join, "on_member_join")
+    bot.add_listener(service.on_leave, "on_member_remove")
     bot.add_listener(service.on_interaction, "on_interaction")
     await bot.add_cog(OnboardingCommands(service))
     return service
