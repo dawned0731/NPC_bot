@@ -32,6 +32,18 @@ def membership_stamp(member):
     return joined.astimezone(timezone.utc).isoformat() if joined else ""
 
 
+def admission_log(member, success, joined_at=""):
+    joined = member.joined_at
+    if not joined and joined_at:
+        try:
+            joined = datetime.fromisoformat(joined_at)
+        except ValueError:
+            pass
+    joined = joined or datetime.now(timezone.utc)
+    nickname = " ".join(member.display_name.replace("/", "·").split())
+    return f"{'⭕' if success else '❌'} {member.id}/{nickname}/{joined.astimezone(KST):%Y-%m-%d %H:%M:%S}"
+
+
 def thread_name(member):
     joined = member.joined_at or datetime.now(timezone.utc)
     day = joined.astimezone(KST).strftime("%Y-%m-%d")
@@ -318,7 +330,8 @@ class Onboarding:
         try:
             await self.sync_roles(member, session, answers, pending["stage"])
         except ValueError as error:
-            await self.audit(member.guild, session["config"], f"입장 역할 처리 실패: {member.id}\n{error}")
+            LOG.warning("Admission role processing failed member=%s: %s", member.id, error)
+            await self.audit(member.guild, session["config"], admission_log(member, False, session.get("joined_at", "")))
             raise
         session.update(answers=answers, stage=pending["stage"], pending=None,
                        revision=session["revision"] + 1)
@@ -328,11 +341,8 @@ class Onboarding:
             session.pop("draft_interests", None)
         await self.save(member, session)
         if session["stage"] in {"tour", "rejected"}:
-            details = []
-            for key, values in (session.get("answers") or {}).items():
-                details.append(f"{key}: " + ", ".join(session["config"]["questions"][key][v]["label"] for v in values))
             await self.audit(member.guild, session["config"],
-                             f"입장 {'완료' if session['stage'] == 'tour' else '제한'}: {member.id}\n" + "\n".join(details))
+                             admission_log(member, session["stage"] == "tour", session.get("joined_at", "")))
 
     def view(self, member_id, session):
         view = discord.ui.View(timeout=None)
@@ -426,17 +436,25 @@ class Onboarding:
                 raise ValueError("현재 봇 입장 안내가 꺼져 있습니다.")
             session = await self.session(member.guild.id, member.id)
             joined_at = membership_stamp(member)
+            thread = None
+            missing_thread = False
+            if session and session.get("thread_id"):
+                try:
+                    # Check Discord directly: a cached thread may already have been deleted.
+                    thread = await self.bot.fetch_channel(session["thread_id"])
+                except discord.NotFound:
+                    missing_thread = True
             # Recover records created by older versions even if their join timestamp was missing.
             missing_completed_role = session and session["stage"] == "done" and not any(
                 r.id == int(session["config"]["member_role_id"]) for r in member.roles)
-            if session and (is_new_membership(member, session) or missing_completed_role):
+            if session and (is_new_membership(member, session) or missing_completed_role or missing_thread):
                 self.validate(member.guild, config)
                 previous = session
                 session = {"stage": "gender", "answers": {},
                            "revision": max(previous["revision"] + 1, int(time.time() * 1000)),
-                           "config": copy.deepcopy(config), "thread_id": previous.get("thread_id", 0),
+                           "config": copy.deepcopy(config), "thread_id": 0 if missing_thread else previous.get("thread_id", 0),
                            "message_id": 0, "tour_index": 1, "joined_at": joined_at,
-                           "returning": True, "cleanup_config": previous.get("cleanup_config") or previous["config"]}
+                           "returning": not missing_thread, "cleanup_config": previous.get("cleanup_config") or previous["config"]}
                 # Persist the reset before external calls, so a failed retry never resumes completion.
                 await self.save(member, session)
             if session and session.get("cleanup_config"):
@@ -456,12 +474,6 @@ class Onboarding:
                            "config": copy.deepcopy(config), "thread_id": 0, "message_id": 0,
                            "tour_index": 1, "joined_at": joined_at}
                 await self.save(member, session)
-            thread = None
-            if session.get("thread_id"):
-                try:
-                    thread = self.bot.get_channel(session["thread_id"]) or await self.bot.fetch_channel(session["thread_id"])
-                except discord.NotFound:
-                    pass
             if thread is None:
                 lobby = member.guild.get_channel(int(session["config"]["lobby_id"]))
                 if not isinstance(lobby, discord.TextChannel):
@@ -514,7 +526,7 @@ class Onboarding:
             LOG.exception("Admission start failed guild=%s member=%s", member.guild.id, member.id)
             try:
                 await self.audit(member.guild, await self.config(member.guild.id),
-                                 f"입장 안내 시작 실패: {member.id}. 권한 확인 후 /입장이어하기를 사용해주세요.")
+                                 admission_log(member, False))
             except Exception:
                 LOG.exception("Admission start failure could not be reported")
 
@@ -603,7 +615,7 @@ class Onboarding:
             await interaction.followup.send("처리를 완료하지 못했습니다. 진행 내용은 저장되며, 대기 채널에서 이어하기를 눌러 다시 시도할 수 있습니다. 계속 실패하면 서버장에게 문의해주세요.", ephemeral=True)
             try:
                 await self.audit(interaction.guild, await self.config(interaction.guild.id),
-                                 f"입장 처리 실패: {interaction.user.id}. 봇 로그와 역할/스레드 권한을 확인해주세요.")
+                                 admission_log(interaction.user, False))
             except Exception:
                 LOG.exception("Admission error reporting failed")
 

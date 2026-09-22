@@ -9,7 +9,7 @@ import discord
 from discord.ext import commands
 
 from onboarding import (Onboarding, OnboardingCommands, _SettingsActions, option_items, choose, default_config, thread_name,
-                        desired_ids, install, managed_ids)
+                        desired_ids, install, managed_ids, admission_log)
 
 
 class MemoryStore:
@@ -128,6 +128,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.member.add_roles = AsyncMock(side_effect=add)
         self.member.remove_roles = AsyncMock(side_effect=remove)
         self.bot = MagicMock()
+        self.bot.fetch_channel = AsyncMock(side_effect=lambda channel_id: self.bot.get_channel(channel_id))
         self.init = AsyncMock()
         self.service = Onboarding(self.bot, self.init, self.store)
         self.service.audit = AsyncMock()
@@ -312,6 +313,57 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         message = SimpleNamespace(edit=AsyncMock())
         thread.fetch_message = AsyncMock(return_value=message)
         return thread
+
+    async def test_deleted_thread_restarts_all_stages_and_clears_roles(self):
+        for stage in ('year', 'review', 'tour', 'done', 'rejected'):
+            with self.subTest(stage=stage):
+                old = session(stage)
+                old['answers'] = {'gender': ['male'], 'year': ['2007'], 'interests': ['game']}
+                old['pending'] = {'answers': old['answers'], 'stage': 'tour'}
+                old['greeted'] = True
+                await self.service.save(self.member, old)
+                self.member.roles = [self.roles[i] for i in (0, 1, 3, 4, 8, 9)]
+                replacement = self.private_thread()
+                replacement.id = 60
+                lobby = MagicMock(spec=discord.TextChannel)
+                lobby.create_thread = AsyncMock(return_value=replacement)
+                self.guild.get_channel.return_value = lobby
+                self.service.validate = MagicMock()
+                self.bot.fetch_channel = AsyncMock(side_effect=discord.NotFound(
+                    SimpleNamespace(status=404, reason='Not Found'), 'Unknown Channel'))
+                # Even a stale cached object must not hide the deletion.
+                self.bot.get_channel.return_value = self.private_thread()
+                await self.service.start(self.member)
+                saved = await self.service.session(200, 100)
+                self.assertEqual(saved['stage'], 'gender')
+                self.assertEqual(saved['answers'], {})
+                self.assertEqual(saved['thread_id'], 60)
+                self.assertNotIn('pending', saved)
+                self.assertGreater(saved['revision'], old['revision'])
+                self.assertEqual({r.id for r in self.member.roles}, {0, 8})
+                lobby.create_thread.assert_awaited_once()
+                replacement.send.assert_awaited_once()
+
+    async def test_thread_access_failure_does_not_reset_progress(self):
+        old = session('review')
+        await self.service.save(self.member, old)
+        self.bot.fetch_channel = AsyncMock(side_effect=discord.Forbidden(
+            SimpleNamespace(status=403, reason='Forbidden'), 'Missing Access'))
+        with self.assertRaises(discord.Forbidden):
+            await self.service.start(self.member)
+        self.assertEqual(await self.service.session(200, 100), old)
+        self.member.remove_roles.assert_not_awaited()
+
+    async def test_admission_logs_are_one_line_with_korean_join_time(self):
+        self.member.joined_at = datetime(2026, 9, 21, 16, 30, tzinfo=timezone.utc)
+        self.member.display_name = '새/회원\n이름'
+        self.assertEqual(admission_log(self.member, True), '⭕ 100/새·회원 이름/2026-09-22 01:30:00')
+        self.assertEqual(admission_log(self.member, False), '❌ 100/새·회원 이름/2026-09-22 01:30:00')
+        for stage in ('tour', 'rejected'):
+            state = session()
+            state['pending'] = {'stage': stage, 'answers': {'gender': ['male'], 'year': ['2007'], 'interests': ['game']}}
+            await self.service.apply_pending(self.member, state)
+            self.assertEqual(self.service.audit.await_args.args[2], admission_log(self.member, stage == 'tour'))
 
     async def test_duplicate_starts_create_one_private_thread_and_add_owner(self):
         thread = self.private_thread()
