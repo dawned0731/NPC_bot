@@ -1746,6 +1746,18 @@ bot = commands.Bot(
 onboarding_service = None
 
 
+async def format_admission_nickname(member, name):
+    """Use the same equipped title and XP as the existing leveling system."""
+    uid = str(member.id)
+    async with get_user_state_lock(uid):
+        data = await aget_user_exp(uid)
+        state = await aget_effective_season_state()
+        if not state.get("first_season_started"):
+            return name
+        title = await aget_equipped_title_text(uid, calculate_level(data.get("exp", 0)))
+        return generate_nickname_with_title(name, title)
+
+
 async def initialize_admitted_member(member):
     """Preserve existing XP, record admission activity, then apply season title."""
     uid = str(member.id)
@@ -4899,7 +4911,9 @@ async def _main():
     global onboarding_service
     # 포트 바인딩(웹 서버) 먼저 시작 → Render의 포트 스캔 통과
     await start_web_app()
-    onboarding_service = await install_onboarding(bot, initialize_admitted_member)
+    onboarding_service = await install_onboarding(bot, initialize_admitted_member,
+                                                format_nickname=format_admission_nickname,
+                                                base_nickname=strip_title_suffix)
     # 이후 디스코드 로그인 루프 진입
     await _safe_start()
 

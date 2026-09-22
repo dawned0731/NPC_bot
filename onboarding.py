@@ -172,11 +172,13 @@ class FirebaseStore:
 
 
 class Onboarding:
-    def __init__(self, bot, initialize_member, store=None):
+    def __init__(self, bot, initialize_member, store=None, *, format_nickname=None, base_nickname=None):
         self.bot = bot
         self.initialize_member = initialize_member
         self.store = store or FirebaseStore()
         self.locks = {}
+        self.format_nickname = format_nickname
+        self.base_nickname = base_nickname or (lambda name: name)
 
     def lock(self, guild_id, user_id):
         return self.locks.setdefault((guild_id, user_id), asyncio.Lock())
@@ -327,7 +329,7 @@ class Onboarding:
         desired = desired_ids(config, answers, stage)
         # Fetch fresh membership for retries and concurrent gateway events.
         member = await member.guild.fetch_member(member.id)
-        if stage == "done" and not korean_nickname(member.display_name):
+        if stage == "done" and not korean_nickname(self.base_nickname(member.display_name)):
             raise ValueError("서버 닉네임을 한글로 변경한 뒤 안내 완료를 눌러주세요.")
         if not member.guild.me.guild_permissions.manage_roles:
             raise ValueError("봇에게 역할 관리 권한이 없습니다.")
@@ -425,8 +427,10 @@ class Onboarding:
             view.add_item(discord.ui.Button(label="안내 완료" if session.get("tour_index", 1) == 4 else "다음 채널",
                                            custom_id=prefix + "next", style=discord.ButtonStyle.primary))
         elif stage == "nickname":
-            view.add_item(discord.ui.Button(label="진행하기", custom_id=prefix + "check_nickname",
+            view.add_item(discord.ui.Button(label="닉네임 설정", custom_id=prefix + "set_nickname",
                                            style=discord.ButtonStyle.primary))
+            view.add_item(discord.ui.Button(label="진행하기", custom_id=prefix + "check_nickname",
+                                           style=discord.ButtonStyle.secondary))
         elif stage == "review":
             view.add_item(discord.ui.Button(label="채널 안내 시작", custom_id=prefix + "complete",
                                            style=discord.ButtonStyle.success, row=0))
@@ -455,7 +459,10 @@ class Onboarding:
             names = [session["config"]["questions"]["interests"][key]["label"] for key in selected]
             content += "\n여러 항목을 고른 뒤 아래 **관심사 선택 확인** 버튼을 눌러주세요.\n\n현재 선택: " + (", ".join(names) or "없음")
         elif stage == "nickname":
-            content = "**서버 닉네임은 한글로만 사용할 수 있어요.**\n한글 닉네임으로 변경한 뒤 **진행하기**를 눌러주세요. 이미 한글이면 바로 진행할 수 있어요.\n\n현재 서버 닉네임: " + discord.utils.escape_markdown(member.display_name)
+            content = "**서버 닉네임은 한글로만 사용할 수 있어요.**\n**닉네임 설정** 버튼을 눌러 입력하면 봇이 변경해드려요. 이미 한글이면 **진행하기**를 눌러주세요.\n\n현재 서버 닉네임: " + discord.utils.escape_markdown(member.display_name)
+            content += f"\n\n이후 닉네임 변경은 <@{member.guild.owner_id}> 님에게 문의해주세요."
+        elif stage == "season" and session.get("nickname_set"):
+            content += f"\n\n닉네임을 설정했어요. 이후 닉네임 변경은 <@{member.guild.owner_id}> 님에게 문의해주세요."
         elif stage == "review":
             content = "**선택한 정보를 확인해주세요.**\n"
             for label, question in QUESTIONS.items():
@@ -599,10 +606,34 @@ class Onboarding:
             except Exception:
                 LOG.exception("Admission start failure could not be reported")
 
+    async def open_nickname_modal(self, interaction):
+        try:
+            _, owner, revision, _ = interaction.data["custom_id"].split(":")
+            if not interaction.guild or int(owner) != interaction.user.id:
+                raise ValueError("입장 중인 본인만 닉네임을 설정할 수 있습니다.")
+            session = await self.session(interaction.guild.id, interaction.user.id)
+            if (not session or session["stage"] != "nickname" or session["revision"] != int(revision)
+                    or session["thread_id"] != interaction.channel_id
+                    or not await self.enabled(interaction.guild.id)):
+                raise ValueError("현재 진행 중인 닉네임 설정 단계에서 사용해주세요.")
+            modal = discord.ui.Modal(title="한글 닉네임 설정", custom_id=f"npcob:{owner}:{revision}:submit_nickname", timeout=600)
+            modal.add_item(discord.ui.TextInput(label="사용할 한글 닉네임", custom_id="nickname",
+                                               placeholder="예: 새벽녘", min_length=1, max_length=32))
+            await interaction.response.send_modal(modal)
+        except ValueError as error:
+            await interaction.response.send_message(str(error), ephemeral=True)
+        except Exception:
+            LOG.exception("Could not open nickname modal")
+            if not interaction.response.is_done():
+                await interaction.response.send_message("입력창을 열지 못했습니다. 잠시 후 다시 눌러주세요.", ephemeral=True)
+
     async def on_interaction(self, interaction):
         data = interaction.data or {}
         custom_id = data.get("custom_id", "")
-        if interaction.type != discord.InteractionType.component or not custom_id.startswith("npcob:"):
+        if interaction.type not in {discord.InteractionType.component, discord.InteractionType.modal_submit} or not custom_id.startswith("npcob:"):
+            return
+        if interaction.type == discord.InteractionType.component and custom_id.endswith(":set_nickname"):
+            await self.open_nickname_modal(interaction)
             return
         is_start = custom_id == "npcob:start"
         # Component updates acknowledge silently; only the lobby needs a private thread link.
@@ -629,7 +660,24 @@ class Onboarding:
                 if int(revision) != session["revision"] or session["stage"] in TERMINAL:
                     # Duplicate/old clicks are harmless and must not clutter the thread.
                     return
-                if session.get("pending"):
+                if action == "submit_nickname":
+                    if interaction.type != discord.InteractionType.modal_submit or session["stage"] != "nickname":
+                        raise ValueError("닉네임은 입장 안내의 닉네임 설정 단계에서만 변경할 수 있습니다.")
+                    values = [item.get("value", "") for row in data.get("components", [])
+                              for item in row.get("components", []) if item.get("custom_id") == "nickname"]
+                    name = unicodedata.normalize("NFC", values[0].strip()) if len(values) == 1 else ""
+                    if not 1 <= len(name) <= 32 or not korean_nickname(name):
+                        raise ValueError("한글 닉네임으로 입력해주세요. 영문과 다른 언어는 사용할 수 없습니다.")
+                    if not member.guild.me.guild_permissions.manage_nicknames:
+                        raise ValueError("봇에게 닉네임 관리 권한이 필요합니다. 서버장에게 문의해주세요.")
+                    if member.id == member.guild.owner_id or member.top_role >= member.guild.me.top_role:
+                        raise ValueError("봇이 변경할 수 없는 역할의 회원입니다. 서버장에게 문의해주세요.")
+                    nickname = await self.format_nickname(member, name) if self.format_nickname else name
+                    member = await member.edit(nick=nickname, reason="입장 안내 닉네임 설정")
+                    session["nickname_set"] = True
+                    await self.save(member, session)
+                    await self.begin_season(member, session)
+                elif session.get("pending"):
                     await self.apply_pending(interaction.user, session)
                 elif action.startswith("edit_"):
                     target = action.removeprefix("edit_")
@@ -658,7 +706,7 @@ class Onboarding:
                     await self.save(member, session)
                     await self.apply_pending(member, session)
                 elif session["stage"] == "nickname" and action == "check_nickname":
-                    if not korean_nickname(member.display_name):
+                    if not korean_nickname(self.base_nickname(member.display_name)):
                         await self.render(member, session)
                         raise ValueError("서버 닉네임을 한글로만 변경한 뒤 진행하기를 눌러주세요.")
                     await self.begin_season(member, session)
@@ -668,7 +716,7 @@ class Onboarding:
                     await self.save(member, session)
                     await self.apply_pending(member, session)
                 elif session["stage"] == "review" and action == "complete":
-                    if not korean_nickname(member.display_name):
+                    if not korean_nickname(self.base_nickname(member.display_name)):
                         session.update(stage="nickname", revision=session["revision"] + 1)
                         await self.save(member, session)
                         await self.render(member, session)
@@ -689,7 +737,7 @@ class Onboarding:
                         return
                     index = session.get("tour_index", 1)
                     if index == 4:
-                        if not korean_nickname(member.display_name):
+                        if not korean_nickname(self.base_nickname(member.display_name)):
                             session["pending"] = {"answers": session.get("answers") or {}, "stage": "nickname"}
                         else:
                             session["pending"] = {"answers": session.get("answers") or {}, "stage": "done"}
@@ -1094,8 +1142,8 @@ class OnboardingCommands(commands.Cog):
         await self.actions.manage.callback(self.actions, interaction, "재시작", 대상)
 
 
-async def install(bot, initialize_member):
-    service = Onboarding(bot, initialize_member)
+async def install(bot, initialize_member, *, format_nickname=None, base_nickname=None):
+    service = Onboarding(bot, initialize_member, format_nickname=format_nickname, base_nickname=base_nickname)
     bot.add_listener(service.on_join, "on_member_join")
     bot.add_listener(service.on_leave, "on_member_remove")
     bot.add_listener(service.on_interaction, "on_interaction")

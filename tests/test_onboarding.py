@@ -628,6 +628,66 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         for name in ('abc', '한글A', '中文', '日本語', 'русский', 'é', '한글\n', '   '):
             self.assertFalse(korean_nickname(name), name)
 
+    def nickname_submission(self, name, revision=1):
+        click = self.interaction(f'npcob:100:{revision}:submit_nickname')
+        click.type = discord.InteractionType.modal_submit
+        click.data['components'] = [{'components': [{'custom_id': 'nickname', 'value': name}]}]
+        return click
+
+    async def test_nickname_button_opens_modal_without_deferring(self):
+        await self.service.save(self.member, session('nickname'))
+        click = self.interaction('npcob:100:1:set_nickname')
+        click.response.send_modal = AsyncMock()
+        await self.service.on_interaction(click)
+        click.response.defer.assert_not_awaited()
+        modal = click.response.send_modal.await_args.args[0]
+        self.assertEqual(modal.custom_id, 'npcob:100:1:submit_nickname')
+        self.assertEqual(modal.children[0].max_length, 32)
+
+    async def test_nickname_modal_changes_name_with_title_and_advances_once(self):
+        await self.service.save(self.member, session('nickname'))
+        self.guild.me.guild_permissions.manage_nicknames = True
+        self.member.top_role = self.roles[8]
+        self.service.format_nickname = AsyncMock(return_value='새벽 1 [ Lv. 3 : 봄 ]')
+        self.service.base_nickname = lambda value: value.split(' [')[0]
+        async def rename(**kwargs):
+            self.member.display_name = kwargs['nick']
+            return self.member
+        self.member.edit = AsyncMock(side_effect=rename)
+        click = self.nickname_submission('새벽 1')
+        await self.service.on_interaction(click)
+        self.member.edit.assert_awaited_once_with(nick='새벽 1 [ Lv. 3 : 봄 ]', reason='입장 안내 닉네임 설정')
+        saved = await self.service.session(200, 100)
+        self.assertEqual(saved['stage'], 'season')
+        self.assertTrue(saved['nickname_set'])
+        click.followup.send.assert_not_awaited()
+        await self.service.on_interaction(self.nickname_submission('다른이름'))
+        self.member.edit.assert_awaited_once()
+        thread = self.private_thread()
+        self.bot.get_channel.return_value = thread
+        await Onboarding.render(self.service, self.member, saved)
+        message = await thread.fetch_message(saved['message_id'])
+        self.assertIn('이후 닉네임 변경은 <@300> 님에게 문의해주세요.', message.edit.await_args.kwargs['content'])
+
+    async def test_nickname_modal_rejects_invalid_other_member_and_missing_permission(self):
+        await self.service.save(self.member, session('nickname'))
+        self.member.edit = AsyncMock()
+        await self.service.on_interaction(self.nickname_submission('English'))
+        other = self.nickname_submission('한글')
+        other.data['custom_id'] = 'npcob:999:1:submit_nickname'
+        await self.service.on_interaction(other)
+        self.guild.me.guild_permissions.manage_nicknames = False
+        await self.service.on_interaction(self.nickname_submission('한글'))
+        self.member.edit.assert_not_awaited()
+        self.assertEqual((await self.service.session(200, 100))['stage'], 'nickname')
+
+    async def test_existing_level_title_is_excluded_from_nickname_validation(self):
+        await self.service.save(self.member, session('nickname'))
+        self.member.display_name = '새벽녘 [ Lv. 20 : 봄 ]'
+        self.service.base_nickname = lambda value: value.split(' [')[0]
+        await self.service.on_interaction(self.interaction('npcob:100:1:check_nickname'))
+        self.assertEqual((await self.service.session(200, 100))['stage'], 'season')
+
     async def test_season_has_four_buttons_and_changes_existing_role(self):
         state = session('season')
         state['answers'] = {'gender': ['male'], 'year': ['2007'], 'interests': ['game']}
