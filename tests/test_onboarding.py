@@ -71,14 +71,15 @@ class SelectionTests(unittest.TestCase):
             with self.subTest(action=action, values=values), self.assertRaises(ValueError):
                 choose(session(), action, values)
 
-    def test_outside_age_requires_confirmation_and_can_go_back(self):
+    def test_outside_age_requires_confirmation_and_cannot_go_back(self):
         state = session("year")
         state["answers"] = {"gender": ["female"]}
         answers, stage = choose(state, "year", ["outside"])
         self.assertEqual(stage, "reject_confirm")
         self.assertEqual(desired_ids(state["config"], answers, stage), {2})
         state.update(answers=answers, stage=stage)
-        self.assertEqual(choose(state, "reject_confirm", ["back"])[1], "year")
+        with self.assertRaises(ValueError):
+            choose(state, "reject_confirm", ["back"])
         answers, stage = choose(state, "reject_confirm", ["confirm"])
         self.assertEqual(desired_ids(state["config"], answers, stage), set())
 
@@ -471,11 +472,11 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_thread_name_uses_user_nickname_and_korean_join_date(self):
         self.member.joined_at = datetime(2026, 9, 21, 16, 0, tzinfo=timezone.utc)
         self.member.display_name = '가을'
-        self.assertEqual(thread_name(self.member), '입장 : 100/가을/2026-09-22')
+        self.assertEqual(thread_name(self.member), '입장 : 가을/2026-09-22')
         self.member.display_name = '긴이름/' * 100
         name = thread_name(self.member)
         self.assertLessEqual(len(name), 100)
-        self.assertEqual(name.count('/'), 2)
+        self.assertEqual(name.count('/'), 1)
         self.assertTrue(name.endswith('/2026-09-22'))
 
     async def test_normal_selection_silently_updates_existing_message(self):
@@ -549,12 +550,30 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         await self.service.save(self.member, state)
         await self.service.on_interaction(self.interaction('npcob:100:1:edit_year'))
         self.assertNotIn(9, {r.id for r in self.member.roles})
-        await self.service.on_interaction(self.interaction('npcob:100:2:year', ['outside']))
-        self.assertEqual((await self.service.session(200, 100))['stage'], 'reject_confirm')
-        await self.service.on_interaction(self.interaction('npcob:100:3:back'))
-        await self.service.on_interaction(self.interaction('npcob:100:4:year', ['2007']))
+        await self.service.on_interaction(self.interaction('npcob:100:2:year', ['2007']))
         self.assertEqual((await self.service.session(200, 100))['stage'], 'review')
         self.assertNotIn(9, {r.id for r in self.member.roles})
+
+    async def test_outside_age_has_contact_mention_and_no_back_button(self):
+        thread = self.private_thread()
+        self.bot.get_channel.return_value = thread
+        state = session('reject_confirm')
+        await Onboarding.render(self.service, self.member, state)
+        message = await thread.fetch_message(state['message_id'])
+        content = message.edit.await_args.kwargs['content']
+        self.assertIn('\n\n입장 관련 문의는 <@300>', content)
+        self.assertEqual([item.custom_id for item in self.service.view(100, state).children],
+                         ['npcob:100:1:confirm'])
+
+    async def test_question_messages_keep_common_intro_separate(self):
+        thread = self.private_thread()
+        self.bot.get_channel.return_value = thread
+        for stage in ('gender', 'year', 'interests', 'review'):
+            state = session(stage)
+            await Onboarding.render(self.service, self.member, state)
+            message = await thread.fetch_message(state['message_id'])
+            content = message.edit.await_args.kwargs['content']
+            self.assertTrue(content.startswith('환영합니다! 성별 → 출생연도 → 관심사 선택을 마치면 서버 채널을 이용할 수 있어요.\n\n'))
 
     async def test_edit_interest_replaces_confirmed_roles_only_after_confirm(self):
         state = session('review')

@@ -35,8 +35,8 @@ def membership_stamp(member):
 def thread_name(member):
     joined = member.joined_at or datetime.now(timezone.utc)
     day = joined.astimezone(KST).strftime("%Y-%m-%d")
-    prefix, suffix = f"입장 : {member.id}/", f"/{day}"
-    nickname = " ".join(member.display_name.replace("/", "·").split()) or str(member.id)
+    prefix, suffix = "입장 : ", f"/{day}"
+    nickname = " ".join(member.display_name.replace("/", "·").split()) or "새 회원"
     return prefix + nickname[:100 - len(prefix) - len(suffix)] + suffix
 
 
@@ -121,8 +121,6 @@ def choose(session, action, values):
             next_stage = "review"
         return answers, next_stage
     if stage == "reject_confirm":
-        if values == ["back"]:
-            return answers, "year"
         if values == ["confirm"]:
             return {}, "rejected"
     raise ValueError("지원하지 않는 요청입니다.")
@@ -353,7 +351,6 @@ class Onboarding:
                 view.add_item(discord.ui.Button(label="관심사 선택 확인", custom_id=prefix + "confirm_interests",
                                                style=discord.ButtonStyle.primary, disabled=not selected, row=1))
         elif stage == "reject_confirm":
-            view.add_item(discord.ui.Button(label="다시 선택", custom_id=prefix + "back"))
             view.add_item(discord.ui.Button(label="확인", style=discord.ButtonStyle.danger,
                                            custom_id=prefix + "confirm"))
         elif stage == "tour":
@@ -377,16 +374,14 @@ class Onboarding:
             await thread.edit(archived=False, locked=False)
         stage = session["stage"]
         content = LABELS.get(stage, "")
-        if stage == "gender":
-            content = "환영합니다! 성별 → 출생연도 → 관심사 선택을 마치면 서버 채널을 이용할 수 있어요.\n\n" + content
-        elif stage == "reject_confirm":
-            content = "허용 출생연도에 해당하지 않으면 입장할 수 없습니다. 확인하면 입장 절차에서 관리하는 역할을 회수합니다. 잘못 눌렀다면 다시 선택해주세요."
+        if stage == "reject_confirm":
+            content = f"허용 출생연도에 해당하지 않으면 입장할 수 없습니다. 확인하면 입장 절차에서 관리하는 역할을 회수합니다.\n\n입장 관련 문의는 <@{member.guild.owner_id}> 님에게 직접 연락해주세요."
         elif stage == "rejected":
-            content = "입장 가능한 출생연도 범위에 해당하지 않아 입장이 제한되었습니다. 입장 관련 역할을 회수했습니다. 잘못 선택했다면 서버장에게 문의해주세요."
+            content = f"입장 가능한 출생연도 범위에 해당하지 않아 입장이 제한되었습니다. 입장 관련 역할을 회수했습니다.\n\n입장 관련 문의는 <@{member.guild.owner_id}> 님에게 직접 연락해주세요."
         elif stage == "interests":
             selected = session.get("draft_interests") or []
             names = [session["config"]["questions"]["interests"][key]["label"] for key in selected]
-            content += "\n\n여러 항목을 고른 뒤 아래 **관심사 선택 확인** 버튼을 눌러주세요.\n현재 선택: " + (", ".join(names) or "없음")
+            content += "\n여러 항목을 고른 뒤 아래 **관심사 선택 확인** 버튼을 눌러주세요.\n\n현재 선택: " + (", ".join(names) or "없음")
         elif stage == "review":
             content = "**선택한 정보를 확인해주세요.**\n"
             for label, question in QUESTIONS.items():
@@ -397,10 +392,12 @@ class Onboarding:
         elif stage == "tour":
             index = str(session.get("tour_index", 1))
             intro = session["config"]["introductions"][f"slot{index}"]
-            content = f"입장 준비가 끝났어요! 주요 채널을 소개합니다. ({index}/4)\n\n<#{intro['channel_id']}>\n{intro['description']}"
+            content = f"입장 준비가 끝났어요! 주요 채널을 소개합니다.\n\n({index}/4) <#{intro['channel_id']}>\n{intro['description']}"
         elif stage == "done":
             content = "안내가 끝났습니다. 즐거운 서버 생활 되세요!\n\n" + "\n".join(
                 f"<#{v['channel_id']}> — {v['description']}" for _, v in sorted(session["config"]["introductions"].items()))
+        if stage in {*LABELS, "review"}:
+            content = "환영합니다! 성별 → 출생연도 → 관심사 선택을 마치면 서버 채널을 이용할 수 있어요.\n\n" + content
         message = None
         if session.get("message_id"):
             try:
