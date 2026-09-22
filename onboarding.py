@@ -274,6 +274,10 @@ class Onboarding:
                 overwrite = lobby.overwrites_for(role)
                 if overwrite.view_channel is False or overwrite.read_message_history is False:
                     errors.append(f"[{label}] '{role.name}' 역할이 대기 채널 접근을 막습니다.")
+        intros = config.get("introductions") or {}
+        intro_ids = {int((intros.get(f"slot{index}") or {}).get("channel_id", 0)) for index in range(1, 5)}
+        season_ids = {int(item.get("role_id", 0)) for item in
+                      (config["questions"].get("season") or {}).values() if item.get("role_id")}
         for channel in guild.channels:
             if isinstance(channel, discord.CategoryChannel) or (lobby and channel.id == lobby.id):
                 continue
@@ -283,8 +287,9 @@ class Onboarding:
                 role = roles.get(role_id)
                 if role:
                     if channel.overwrites_for(role).view_channel is True:
-                        errors.append(f"[채널 접근] '{role.name}'이 '{channel.name}'을 엽니다. 채널 열기는 기본 역할에만 허용해주세요.")
-        intros = config.get("introductions") or {}
+                        if role_id in season_ids and channel.id in intro_ids:
+                            continue
+                        errors.append(f"[채널 접근] '{role.name}'이 '{channel.name}'을 엽니다. 채널 열기는 기본 역할 또는 소개 채널의 계절 역할에만 허용해주세요.")
         gate = roles.get(int(config.get("member_role_id", 0)))
         for index in range(1, 5):
             item = intros.get(f"slot{index}") or {}
@@ -292,7 +297,11 @@ class Onboarding:
             if not isinstance(channel, discord.TextChannel) or not item.get("description"):
                 errors.append(f"[채널 소개 {index}번] /입장채널소개로 채널과 설명을 지정해주세요.")
             elif gate and channel.overwrites_for(gate).view_channel is not True:
-                errors.append(f"[채널 소개 {index}번] 기본 역할에 '{channel.name}' 채널 보기를 명시적으로 허용해주세요.")
+                seasons_can_view = len(season_ids) == len(SEASONS) and all(
+                    role_id in roles and channel.overwrites_for(roles[role_id]).view_channel is True
+                    for role_id in season_ids)
+                if not seasons_can_view:
+                    errors.append(f"[채널 소개 {index}번] 기본 역할 또는 네 계절 역할 모두에 '{channel.name}' 채널 보기를 명시적으로 허용해주세요.")
         log = guild.get_channel(int(config.get("log_id", 0)))
         if not isinstance(log, discord.TextChannel):
             errors.append("[기록 채널] /입장기본설정으로 비공개 기록 채널을 지정해주세요.")
@@ -473,7 +482,7 @@ class Onboarding:
         elif stage == "tour":
             index = str(session.get("tour_index", 1))
             intro = session["config"]["introductions"][f"slot{index}"]
-            content = f"주요 채널을 소개합니다. 네 채널을 확인하고 안내 완료를 누르면 서버 채널을 이용할 수 있어요.\n\n({index}/4) <#{intro['channel_id']}>\n{intro['description']}"
+            content = f"주요 채널을 소개합니다. 네 채널을 확인하고 안내 완료를 누르면 나머지 서버 채널도 이용할 수 있어요.\n\n({index}/4) <#{intro['channel_id']}>\n{intro['description']}"
         elif stage == "done":
             content = "안내가 끝났습니다. 즐거운 서버 생활 되세요!\n\n" + "\n".join(
                 f"<#{v['channel_id']}> — {v['description']}" for _, v in sorted(session["config"]["introductions"].items()))

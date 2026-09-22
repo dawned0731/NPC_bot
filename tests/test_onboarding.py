@@ -470,6 +470,33 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "서버에 없습니다"):
             self.service.validate(self.guild, config)
 
+    async def test_season_roles_may_open_only_introduction_channels(self):
+        channels = self.valid_guild()
+        for channel_id in range(41, 45):
+            channels[channel_id].overwrites_for.side_effect = lambda role: discord.PermissionOverwrite(
+                view_channel=role.id in {10, 11, 12, 13})
+        self.assertEqual(self.service.inspect(self.guild, configured()), [])
+        extra = MagicMock(spec=discord.TextChannel)
+        extra.id, extra.name = 70, '일반채널'
+        extra.permissions_for.return_value = discord.Permissions.none()
+        extra.overwrites_for.side_effect = lambda role: discord.PermissionOverwrite(view_channel=role.id == 10)
+        self.guild.channels.append(extra)
+        self.assertTrue(any('일반채널' in error for error in self.service.inspect(self.guild, configured())))
+
+    async def test_season_exception_does_not_allow_other_roles_or_private_log(self):
+        channels = self.valid_guild()
+        channels[41].overwrites_for.side_effect = lambda role: discord.PermissionOverwrite(
+            view_channel=role.id in {1, 9, 10, 11, 12, 13})
+        errors = self.service.inspect(self.guild, configured())
+        self.assertTrue(any('decorated-role-1\'' in error for error in errors))
+        channels[31].overwrites_for.side_effect = lambda role: discord.PermissionOverwrite(view_channel=role.id == 10)
+        self.assertTrue(any('[기록 채널]' in error for error in self.service.inspect(self.guild, configured())))
+
+    async def test_all_seasons_need_intro_access_when_basic_role_does_not_open_it(self):
+        channels = self.valid_guild()
+        channels[41].overwrites_for.side_effect = lambda role: discord.PermissionOverwrite(view_channel=role.id in {10, 11, 12})
+        self.assertTrue(any('[채널 소개 1번]' in error for error in self.service.inspect(self.guild, configured())))
+
     async def test_inspection_collects_all_missing_mappings_without_hierarchy_advice(self):
         self.valid_guild()
         config = configured()
