@@ -27,6 +27,19 @@ LABELS = {"gender": "성별을 선택해주세요", "year": "출생연도를 선
           "interests": "관심사를 하나 이상 선택해주세요 (복수 선택 가능)", "season": "마음에 드는 계절을 골라주세요."}
 TERMINAL = {"done", "rejected"}
 KST = timezone(timedelta(hours=9))
+MEMBER_GUIDE = (
+    "**'사계절, 그 사이'에 오신 것을 환영합니다!**\n\n"
+    "서버 채팅창에서 `/`를 입력해 아래 명령어를 사용할 수 있어요.\n"
+    "• `/정보` — 내 정보 카드를 확인해요.\n"
+    "• `/출석` — 오늘의 출석을 기록해요.\n"
+    "• `/퀘스트` — 일일·음성 활동 퀘스트 현황을 확인해요.\n"
+    "• `/랭킹` — 경험치 순위를 확인해요.\n"
+    "• `/출석랭킹` — 출석 순위를 확인해요.\n"
+    "• `/시즌정보` — 현재 시즌과 내 진행도를 확인해요.\n"
+    "• `/칭호관리` — 보유한 칭호를 확인하고 착용해요.\n"
+    "• `/건의함` — 서버에 대한 건의를 전달해요.\n\n"
+    "명령어는 이 DM이 아닌 서버 안에서 사용해주세요. 앞으로 잘 지내봐요!"
+)
 
 
 def membership_stamp(member):
@@ -388,6 +401,41 @@ class Onboarding:
                              admission_log(member, session["stage"] == "done", session.get("joined_at", ""),
                                            reason="허용 출생연도 범위 밖", returning=session.get("returning", False),
                                            previous_joined_at=session.get("previous_joined_at", "")))
+        if session["stage"] == "done":
+            session["completion_notices"] = session.get("completion_notices") or {}
+            await self.save(member, session)
+            await self.send_completion_notices(member, session)
+
+    async def send_completion_notices(self, member, session):
+        notices = session.get("completion_notices")
+        if session["stage"] != "done" or notices is None:
+            return
+        config = await self.config(member.guild.id)
+        for kind in ("welcome", "dm"):
+            if kind in notices:
+                continue
+            if kind == "welcome" and not config.get("welcome_channel_id"):
+                notices[kind] = "not_configured"
+                await self.save(member, session)
+                continue
+            # Record before sending so duplicate clicks/restarts cannot send a second greeting.
+            notices[kind] = "sending"
+            await self.save(member, session)
+            try:
+                if kind == "welcome":
+                    channel = member.guild.get_channel(int(config["welcome_channel_id"]))
+                    if not isinstance(channel, discord.TextChannel):
+                        raise ValueError("환영 채널이 삭제되었거나 올바르지 않습니다.")
+                    await channel.send(f"환영합니다 **{member.mention}** 님! '사계절, 그 사이' 서버입니다. 앞으로 잘 지내봐요!",
+                                       allowed_mentions=discord.AllowedMentions(users=[member], roles=False, everyone=False))
+                else:
+                    await member.send(MEMBER_GUIDE, allowed_mentions=NO_PING)
+                notices[kind] = "sent"
+            except Exception:
+                notices[kind] = "failed"
+                LOG.exception("Admission completion notice failed kind=%s member=%s", kind, member.id)
+                await self.audit(member.guild, config, f"입장 완료 후 {'환영 인사' if kind == 'welcome' else '명령어 DM'} 전송 실패: {member.id}. 입장은 정상 완료됐습니다.")
+            await self.save(member, session)
 
     async def begin_season(self, member, session):
         if not session["config"]["questions"].get("season") or any(
@@ -486,6 +534,8 @@ class Onboarding:
         elif stage == "done":
             content = "안내가 끝났습니다. 즐거운 서버 생활 되세요!\n\n" + "\n".join(
                 f"<#{v['channel_id']}> — {v['description']}" for _, v in sorted(session["config"]["introductions"].items()))
+            if (session.get("completion_notices") or {}).get("dm") == "failed":
+                content += "\n\n개인 DM을 보내지 못해 명령어 안내를 여기에 남겨드려요.\n\n" + MEMBER_GUIDE
         if stage in {*LABELS, "nickname", "review"}:
             content = "환영합니다! 성별 → 출생연도 → 관심사 선택을 마치면 서버 채널을 이용할 수 있어요.\n\n" + content
         message = None
@@ -547,6 +597,7 @@ class Onboarding:
             if session and session["stage"] in TERMINAL:
                 if session.get("pending"):
                     await self.apply_pending(member, session)
+                await self.send_completion_notices(member, session)
                 # Retry final message/archive if the previous Discord call failed.
                 return await self.render(member, session)
             if not session:
@@ -1008,6 +1059,24 @@ class OnboardingCommands(commands.Cog):
             "순서를 지정하면 작은 번호부터 표시됩니다. 기본 출생연도 순서는 07년생 → 90년생입니다.",
             "저장한 설정은 유지됩니다. 진행 중인 신입에게 변경을 적용하려면 /입장재시작을 사용하세요."])
 
+    @app_commands.command(name="입장환영설정", description="입장 안내 완료 후 신입을 환영할 채널을 지정합니다")
+    @app_commands.describe(채널="환영 인사를 보낼 채널: 기본 회원 역할로 볼 수 있는 채널")
+    @app_commands.guild_only()
+    @app_commands.default_permissions(administrator=True)
+    @app_commands.checks.has_permissions(administrator=True)
+    async def welcome_settings(self, interaction: discord.Interaction, 채널: discord.TextChannel):
+        await interaction.response.defer(ephemeral=True)
+        perms = 채널.permissions_for(interaction.guild.me)
+        if not perms.view_channel or not perms.send_messages:
+            raise ValueError("환영 채널에서 봇의 채널 보기·메시지 보내기를 허용해주세요.")
+        async with self.service.lock(interaction.guild_id, "config"):
+            config = await self.service.config(interaction.guild_id)
+            if 채널.id in {int(config.get("lobby_id", 0)), int(config.get("log_id", 0))}:
+                raise ValueError("대기/비공개 기록 채널 대신 회원들이 사용하는 채널을 지정해주세요.")
+            config["welcome_channel_id"] = 채널.id
+            await self.service.save_config(interaction.guild_id, config)
+        await interaction.followup.send(f"입장 완료 후 {채널.mention}에 환영 인사를 보내고, 신입에게 명령어 안내를 DM으로 보냅니다.", ephemeral=True)
+
     @app_commands.command(name="입장현황", description="현재 채널·역할 연결·소개 4개를 설정 순서대로 모두 확인합니다")
     @app_commands.guild_only()
     @app_commands.default_permissions(administrator=True)
@@ -1024,7 +1093,8 @@ class OnboardingCommands(commands.Cog):
         lines = [f"**입장 안내: {'켜짐' if config['enabled'] else '꺼짐'}**", "**1. 기본 설정**",
                  f"대기 채널: {channel_label(config['lobby_id'])}",
                  f"기본 회원 역할: {role_label(config['member_role_id'])}",
-                 f"기록 채널: {channel_label(config['log_id'])}", "", "**2. 선택지 → 기존 역할**"]
+                 f"기록 채널: {channel_label(config['log_id'])}",
+                 f"환영 채널: {channel_label(config.get('welcome_channel_id'))}", "", "**2. 선택지 → 기존 역할**"]
         for label, question in QUESTIONS.items():
             lines.append(f"**{label}**")
             items = option_items(config, question)

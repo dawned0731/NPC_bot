@@ -110,6 +110,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.member.roles = [self.roles[0], self.roles[8]]  # unrelated role
         self.member.mention = "<@100>"
         self.member.display_name = "신입"
+        self.member.send = AsyncMock()
         self.guild = MagicMock(spec=discord.Guild)
         self.guild.id = 200
         self.guild.owner_id = 300
@@ -295,7 +296,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         try:
             await install(bot, AsyncMock())
             self.assertEqual({cmd.name for cmd in bot.tree.get_commands()},
-                             {"입장도움말", "입장현황", "입장검사", "입장기본설정", "입장역할연결", "입장선택지삭제", "입장채널소개", "입장안내게시", "입장시작", "입장중지", "입장이어하기", "입장재시작"})
+                             {"입장환영설정", "입장도움말", "입장현황", "입장검사", "입장기본설정", "입장역할연결", "입장선택지삭제", "입장채널소개", "입장안내게시", "입장시작", "입장중지", "입장이어하기", "입장재시작"})
             for cmd in bot.tree.get_commands():
                 self.assertTrue(cmd.default_permissions.administrator)
                 self.assertTrue(cmd.checks)
@@ -765,6 +766,51 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
                              self.service.on_interaction(self.interaction('npcob:100:1:next')))
         self.assertEqual(self.operations.count(('add', 9)), 1)
         self.service.audit.assert_awaited_once()
+
+    async def test_completion_welcome_and_dm_are_sent_once_after_gate(self):
+        config = configured()
+        config['welcome_channel_id'] = 70
+        await self.service.save_config(200, config)
+        channel = MagicMock(spec=discord.TextChannel)
+        channel.send = AsyncMock()
+        self.guild.get_channel.return_value = channel
+        state = session('tour')
+        state['tour_index'] = 4
+        state['answers'] = {'gender': ['male'], 'year': ['2007'], 'interests': ['game'], 'season': ['spring']}
+        await self.service.save(self.member, state)
+        await self.service.on_interaction(self.interaction('npcob:100:1:next'))
+        saved = await self.service.session(200, 100)
+        self.assertEqual(saved['stage'], 'done')
+        self.assertIn(9, {role.id for role in self.member.roles})
+        self.assertEqual(channel.send.await_args.args[0], "환영합니다 **<@100>** 님! '사계절, 그 사이' 서버입니다. 앞으로 잘 지내봐요!")
+        self.assertEqual(channel.send.await_args.kwargs['allowed_mentions'].users, [self.member])
+        self.assertIn('/정보', self.member.send.await_args.args[0])
+        self.assertNotIn('/경험치지급', self.member.send.await_args.args[0])
+        await self.service.send_completion_notices(self.member, saved)
+        channel.send.assert_awaited_once()
+        self.member.send.assert_awaited_once()
+
+    async def test_blocked_dm_does_not_undo_admission_and_has_thread_fallback(self):
+        state = session('done')
+        state['completion_notices'] = {}
+        self.member.send.side_effect = discord.Forbidden(SimpleNamespace(status=403, reason='Forbidden'), 'Cannot send messages')
+        with self.assertLogs('onboarding', level='ERROR'):
+            await self.service.send_completion_notices(self.member, state)
+        self.assertEqual(state['stage'], 'done')
+        self.assertEqual(state['completion_notices']['dm'], 'failed')
+        thread = self.private_thread()
+        self.bot.get_channel.return_value = thread
+        await Onboarding.render(self.service, self.member, state)
+        message = await thread.fetch_message(state['message_id'])
+        self.assertIn('/퀘스트', message.edit.await_args.kwargs['content'])
+
+    async def test_welcome_settings_persists_selected_channel(self):
+        channel = MagicMock(spec=discord.TextChannel)
+        channel.id, channel.mention = 70, '<#70>'
+        channel.permissions_for.return_value = discord.Permissions.all()
+        cog = OnboardingCommands(self.service)
+        await cog.welcome_settings.callback(cog, self.interaction(), channel)
+        self.assertEqual((await self.service.config(200))['welcome_channel_id'], 70)
 
     async def test_returning_success_log_keeps_previous_join_date(self):
         old = session('done')
