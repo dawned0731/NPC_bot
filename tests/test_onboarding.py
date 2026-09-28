@@ -785,10 +785,30 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(channel.send.await_args.args[0], "환영합니다 **<@100>** 님! '사계절, 그 사이' 서버입니다. 앞으로 잘 지내봐요!")
         self.assertEqual(channel.send.await_args.kwargs['allowed_mentions'].users, [self.member])
         self.assertIn('/정보', self.member.send.await_args.args[0])
+        self.assertIn('사계절, 그 사이를 소개할게요', self.member.send.await_args_list[0].args[0])
+        self.assertIn('<@300>', self.member.send.await_args_list[0].args[0])
+        self.assertIn('/정보', self.member.send.await_args_list[1].args[0])
+        self.assertEqual(saved['completion_notices']['intro_dm'], 'sent')
         self.assertNotIn('/경험치지급', self.member.send.await_args.args[0])
         await self.service.send_completion_notices(self.member, saved)
         channel.send.assert_awaited_once()
+        self.assertEqual(self.member.send.await_count, 2)
+
+    async def test_intro_dm_failure_prevents_commands_from_arriving_first(self):
+        state = session('done')
+        state['completion_notices'] = {}
+        self.member.send.side_effect = discord.Forbidden(SimpleNamespace(status=403, reason='Forbidden'), 'Cannot send messages')
+        with self.assertLogs('onboarding', level='ERROR'):
+            await self.service.send_completion_notices(self.member, state)
         self.member.send.assert_awaited_once()
+        self.assertNotIn('intro_dm', state['completion_notices'])
+        self.assertEqual(state['completion_notices']['dm'], 'failed')
+
+    async def test_existing_completed_dm_is_not_sent_again_after_update(self):
+        state = session('done')
+        state['completion_notices'] = {'welcome': 'sent', 'dm': 'sent'}
+        await self.service.send_completion_notices(self.member, state)
+        self.member.send.assert_not_awaited()
 
     async def test_blocked_dm_does_not_undo_admission_and_has_thread_fallback(self):
         state = session('done')

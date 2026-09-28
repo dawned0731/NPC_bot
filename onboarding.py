@@ -27,6 +27,18 @@ LABELS = {"gender": "성별을 선택해주세요", "year": "출생연도를 선
           "interests": "관심사를 하나 이상 선택해주세요 (복수 선택 가능)", "season": "마음에 드는 계절을 골라주세요."}
 TERMINAL = {"done", "rejected"}
 KST = timezone(timedelta(hours=9))
+SERVER_INTRO = (
+    "🌿 **사계절, 그 사이를 소개할게요**\n\n"
+    "이곳은 다양한 게임을 함께 즐기고, 일상을 나누며 편하게 친해지는 종합게임 서버예요. 같이 게임할 친구를 만나기도 하고, 가끔은 정모로 얼굴을 보며 시간을 보내기도 해요.\n\n"
+    "매일 접속하거나 대화에 꼭 참여해야 한다는 부담은 내려놓으셔도 괜찮아요. 시간 날 때 들러서, 좋아하는 게임과 이야기를 함께 즐겨주세요.\n\n"
+    "🌱 **이름 뒤에 붙은 레벨과 시즌명은 뭔가요?**\n\n"
+    "닉네임 뒤의 `Lv.`는 서버에서 활동하며 쌓아가는 레벨이고, 함께 표시되는 이름은 현재 시즌의 이름이에요. 계절이 바뀌듯 서버에서도 시즌마다 새로운 이름으로 활동을 이어갑니다.\n\n"
+    "레벨은 높아야 대접받거나 어울릴 수 있는 기준이 아니에요. 함께 보낸 시간을 담는 작은 재미 정도로 생각해주세요. 궁금하다면 `/시즌정보`와 `/퀘스트`로 내 진행 상황을 확인할 수 있어요.\n\n"
+    "🎮 **처음에는 이렇게 시작해보세요**\n\n"
+    "대화방에 가볍게 인사를 남기거나, 게임 구인방에서 하고 싶은 게임을 이야기해보세요. 다른 분이 올린 모집에 함께하고 싶다고 말을 걸어주셔도 좋아요.\n\n"
+    "처음이라 낯설거나, 같이 놀고 싶은데 먼저 말 걸기가 부끄럽다면 **<@{owner_id}>** 님에게 편하게 연락해주세요. 어떤 게임을 좋아하는지 알려주시면 함께 어울릴 수 있도록 도와드릴게요.\n\n"
+    "서두르지 않아도 괜찮아요.\n여러분의 속도로, 우리 사이에 천천히 스며들어 주세요. 🌸"
+)
 MEMBER_GUIDE = (
     "**'사계절, 그 사이'에 오신 것을 환영합니다!**\n\n"
     "서버 채팅창에서 `/`를 입력해 아래 명령어를 사용할 수 있어요.\n"
@@ -429,6 +441,9 @@ class Onboarding:
                     await channel.send(f"환영합니다 **{member.mention}** 님! '사계절, 그 사이' 서버입니다. 앞으로 잘 지내봐요!",
                                        allowed_mentions=discord.AllowedMentions(users=[member], roles=False, everyone=False))
                 else:
+                    await member.send(SERVER_INTRO.format(owner_id=member.guild.owner_id), allowed_mentions=NO_PING)
+                    notices["intro_dm"] = "sent"
+                    await self.save(member, session)
                     await member.send(MEMBER_GUIDE, allowed_mentions=NO_PING)
                 notices[kind] = "sent"
             except Exception:
