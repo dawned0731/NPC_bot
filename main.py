@@ -16,6 +16,7 @@ import functools
 import pytz
 import aiohttp
 from onboarding import install as install_onboarding
+from attendance_ui import recovery_offer, apply_recovery, attendance_embed, recovery_view
 
 from threading import Thread
 from datetime import time as dtime
@@ -550,7 +551,7 @@ SEASON_XP_PER_LEVEL = 1100
 SEASON_TOTAL_XP_TO_MAX = SEASON_XP_PER_LEVEL * (SEASON_MAX_LEVEL - 1)
 
 # 출석 고정 경험치
-ATTENDANCE_EXP_REWARD = 200
+ATTENDANCE_EXP_REWARD = 1200
 
 # 시즌 공지 채널
 SEASON_NOTICE_CHANNEL_ID = 1506509476297969766
@@ -2908,27 +2909,17 @@ async def attend(interaction: discord.Interaction):
         prev_last = ud.get("last_date", "")
 
         if prev_last == today_str:
-            h, m = _until_next_attendance(now)
-            headline = random.choice(ATTEND_MSG_ALREADY).format(mention=interaction.user.mention)
-            msg = "\n".join([
-                headline,
-                _build_attendance_stats_line(ud["total_days"], ud["streak"]),
-                f"다음 출석까지 {h}시간 {m}분",
-            ])
-            return await interaction.followup.send(msg)
+            ue = await aget_user_exp(uid)
+            return await interaction.followup.send(
+                embed=attendance_embed(interaction.user, ud, ue.get("exp", 0),
+                                       get_level_progress, SEASON_MAX_LEVEL, already=True),
+                view=recovery_view(uid, ud))
 
-        natural_continue = prev_last == yesterday
-        is_first = prev_last == ""
-        prev_streak = _safe_int(ud.get("streak", 0), 0)
-        if is_first:
-            new_streak = 1
-            headline = random.choice(ATTEND_MSG_FIRST).format(mention=interaction.user.mention)
-        elif natural_continue:
-            new_streak = prev_streak + 1
-            headline = random.choice(ATTEND_MSG_SUCCESS).format(mention=interaction.user.mention)
-        else:
-            new_streak = 1
-            headline = random.choice(ATTEND_MSG_RESET).format(mention=interaction.user.mention)
+        season = await aget_effective_season_state()
+        ud["recovery"] = recovery_offer(ud, today_str, season.get("current_season_id"))
+        ud["recovered_cost"] = 0
+        ud["daily_gain"] = gain
+        new_streak = ud["streak"] + 1 if prev_last == yesterday else 1
 
         ud["streak"] = new_streak
         ud["last_date"] = today_str
@@ -2973,16 +2964,50 @@ async def attend(interaction: discord.Interaction):
         await maybe_award_level100(interaction.user, final_level, reason="attendance")
 
     await update_role_and_nick(interaction.user, final_level)
-    lines = [headline]
-    if new_streak in ATTEND_MILESTONE_STREAKS:
-        lines.append(
-            random.choice(ATTEND_MSG_MILESTONE).format(
-                mention=interaction.user.mention,
-                streak=new_streak,
-            )
-        )
-    lines.append(_build_attendance_stats_line(ud["total_days"], ud["streak"], gain))
-    await interaction.followup.send("\n".join(lines))
+    await interaction.followup.send(
+        embed=attendance_embed(interaction.user, ud, ue.get("exp", 0),
+                               get_level_progress, SEASON_MAX_LEVEL),
+        view=recovery_view(uid, ud))
+
+
+@bot.listen("on_interaction")
+async def attendance_recovery_interaction(interaction: discord.Interaction):
+    custom_id = (interaction.data or {}).get("custom_id", "")
+    if not custom_id.startswith("attendance:recover:"):
+        return
+    parts = custom_id.split(":")
+    if len(parts) != 4:
+        return
+    uid, offered_date = parts[2:]
+    if str(interaction.user.id) != uid or interaction.guild is None:
+        return await interaction.response.send_message("본인의 출석만 복구할 수 있어요.", ephemeral=True)
+    await interaction.response.defer()
+    try:
+        async with get_user_state_lock(uid):
+            today = datetime.now(KST).strftime("%Y-%m-%d")
+            if offered_date != today:
+                raise ValueError("복구 기한이 지났습니다. /출석으로 현재 기록을 확인해주세요.")
+            ud = normalize_attendance_record(await aget_attendance_user(uid))
+            ue = await aget_user_exp(uid)
+            season = await aget_effective_season_state()
+            ud, ue = apply_recovery(ud, ue, today, season.get("current_season_id"), calculate_level)
+            await afirebase_root_update_strict({
+                f"{ATTENDANCE_DB_KEY}/{uid}": ud,
+                f"exp_data/{uid}": ue,
+            })
+            # Keep role/nickname refresh ordered with other XP changes.
+            try:
+                await update_role_and_nick(interaction.user, ue["level"])
+            except Exception:
+                logging.exception("attendance recovery role/nickname refresh failed uid=%s", uid)
+        await interaction.edit_original_response(
+            embed=attendance_embed(interaction.user, ud, ue["exp"],
+                                   get_level_progress, SEASON_MAX_LEVEL), view=None)
+    except ValueError as error:
+        await interaction.followup.send(str(error), ephemeral=True)
+    except Exception:
+        logging.exception("attendance recovery failed uid=%s", uid)
+        await interaction.followup.send("처리 결과를 확인하지 못했어요. /출석으로 현재 기록을 확인한 뒤 다시 시도해주세요.", ephemeral=True)
 
 @app_commands.guild_only()
 @bot.tree.command(name="출석랭킹", description="출석 랭킹을 확인합니다.")
@@ -3082,6 +3107,8 @@ async def attendance_edit(
                     )
                 ud["last_date"] = ld
 
+        ud["recovery"] = None
+        ud["recovered_cost"] = 0
         await aset_attendance_user(uid, ud)
 
     await interaction.response.send_message(
