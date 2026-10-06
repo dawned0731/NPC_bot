@@ -1746,6 +1746,11 @@ bot = commands.Bot(
 onboarding_service = None
 
 
+async def get_departure_last_activity(member_id):
+    data = await aget_user_exp(str(member_id))
+    return data.get("last_activity")
+
+
 async def format_admission_nickname(member, name):
     """Use the same equipped title and XP as the existing leveling system."""
     uid = str(member.id)
@@ -4913,7 +4918,8 @@ async def _main():
     await start_web_app()
     onboarding_service = await install_onboarding(bot, initialize_admitted_member,
                                                 format_nickname=format_admission_nickname,
-                                                base_nickname=strip_title_suffix)
+                                                base_nickname=strip_title_suffix,
+                                                last_activity=get_departure_last_activity)
     # 이후 디스코드 로그인 루프 진입
     await _safe_start()
 

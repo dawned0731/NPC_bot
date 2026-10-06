@@ -297,7 +297,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         try:
             await install(bot, AsyncMock())
             self.assertEqual({cmd.name for cmd in bot.tree.get_commands()},
-                             {"입장환영설정", "입장도움말", "입장현황", "입장검사", "입장기본설정", "입장역할연결", "입장선택지삭제", "입장채널소개", "입장안내게시", "입장시작", "입장중지", "입장이어하기", "입장재시작"})
+                             {"퇴장로그설정", "입장환영설정", "입장도움말", "입장현황", "입장검사", "입장기본설정", "입장역할연결", "입장선택지삭제", "입장채널소개", "입장안내게시", "입장시작", "입장중지", "입장이어하기", "입장재시작"})
             for cmd in bot.tree.get_commands():
                 self.assertTrue(cmd.default_permissions.administrator)
                 self.assertTrue(cmd.checks)
@@ -834,6 +834,42 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         cog = OnboardingCommands(self.service)
         await cog.welcome_settings.callback(cog, self.interaction(), channel)
         self.assertEqual((await self.service.config(200))['welcome_channel_id'], 70)
+
+    async def test_departure_settings_are_independent_of_admission(self):
+        before = await self.service.config(200)
+        channel = MagicMock(spec=discord.TextChannel)
+        channel.id, channel.mention = 71, '<#71>'
+        channel.permissions_for.return_value = discord.Permissions.all()
+        cog = OnboardingCommands(self.service)
+        await cog.departure_settings.callback(cog, self.interaction(), channel)
+        self.assertEqual(await self.store.get('departure_config/200'), {'channel_id': 71})
+        self.assertEqual(await self.service.config(200), before)
+
+    async def test_departure_logs_member_without_admission_session_when_disabled(self):
+        await self.store.put('departure_config/200', {'channel_id': 71})
+        config = configured()
+        config['enabled'] = False
+        await self.service.save_config(200, config)
+        self.service.last_activity = AsyncMock(return_value=datetime(2026, 10, 1, tzinfo=timezone.utc).timestamp())
+        await self.service.on_leave(self.member)
+        guild, destination, embed = self.service.audit.await_args.args
+        self.assertEqual(destination['log_id'], 71)
+        fields = {f.name: f.value for f in embed.fields}
+        self.assertEqual(fields['서버에서 사용한 닉네임'], '신입')
+        self.assertEqual(fields['마지막 활동 · 봇 기록 기준'], '2026-10-01 09:00:00')
+        self.assertIn('https://discord.com/users/100', fields['프로필'])
+        self.assertEqual(self.service.audit.await_args.kwargs['avatar'], self.member.display_avatar)
+
+    async def test_departure_activity_error_does_not_block_log(self):
+        await self.store.put('departure_config/200', {'channel_id': 71})
+        self.service.last_activity = AsyncMock(side_effect=RuntimeError('database unavailable'))
+        with self.assertLogs('onboarding', level='ERROR'):
+            await self.service.on_leave(self.member)
+        self.assertIn('조회 실패', [f.value for f in self.service.audit.await_args.args[2].fields])
+
+    async def test_departure_without_channel_is_not_sent_to_admission_log(self):
+        await self.service.on_leave(self.member)
+        self.service.audit.assert_not_awaited()
 
     async def test_returning_success_log_keeps_previous_join_date(self):
         old = session('done')

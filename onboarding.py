@@ -253,13 +253,14 @@ class FirebaseStore:
 
 
 class Onboarding:
-    def __init__(self, bot, initialize_member, store=None, *, format_nickname=None, base_nickname=None):
+    def __init__(self, bot, initialize_member, store=None, *, format_nickname=None, base_nickname=None, last_activity=None):
         self.bot = bot
         self.initialize_member = initialize_member
         self.store = store or FirebaseStore()
         self.locks = {}
         self.format_nickname = format_nickname
         self.base_nickname = base_nickname or (lambda name: name)
+        self.last_activity = last_activity
 
     def lock(self, guild_id, user_id):
         return self.locks.setdefault((guild_id, user_id), asyncio.Lock())
@@ -751,6 +752,7 @@ class Onboarding:
     async def on_leave(self, member):
         if member.bot:
             return
+        left_at = datetime.now(timezone.utc)
         try:
             async with self.lock(member.guild.id, member.id):
                 session = await self.session(member.guild.id, member.id)
@@ -763,6 +765,34 @@ class Onboarding:
                     await self.save(member, session)
         except Exception:
             LOG.exception("Could not record departure guild=%s member=%s", member.guild.id, member.id)
+        try:
+            await self.log_departure(member, left_at)
+        except Exception:
+            LOG.exception("Could not send departure log guild=%s member=%s", member.guild.id, member.id)
+
+    async def log_departure(self, member, left_at):
+        config = await self.store.get(f"departure_config/{member.guild.id}") or {}
+        if not config.get("channel_id"):
+            return
+        activity_text = "기록 없음"
+        if self.last_activity:
+            try:
+                stamp = await self.last_activity(member.id)
+                if stamp and float(stamp) > 0:
+                    activity_text = datetime.fromtimestamp(float(stamp), timezone.utc).astimezone(KST).strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                activity_text = "조회 실패"
+                LOG.exception("Could not read departure activity member=%s", member.id)
+        embed = discord.Embed(title="🚪 서버 퇴장", color=0xCC8B71, timestamp=left_at)
+        embed.add_field(name="회원", value=f"{member.mention}\n{discord.utils.escape_markdown(str(member))}", inline=True)
+        embed.add_field(name="회원 ID", value=str(member.id), inline=True)
+        embed.add_field(name="서버에서 사용한 닉네임", value=discord.utils.escape_markdown(member.display_name), inline=False)
+        embed.add_field(name="퇴장 시각 · 한국 시간", value=left_at.astimezone(KST).strftime("%Y-%m-%d %H:%M:%S"), inline=True)
+        embed.add_field(name="마지막 활동 · 봇 기록 기준", value=activity_text, inline=True)
+        embed.add_field(name="프로필", value=f"[Discord 프로필 열기](https://discord.com/users/{member.id})", inline=False)
+        embed.set_thumbnail(url=str(member.display_avatar.url))
+        embed.set_footer(text="사계절, 그 사이 · 퇴장 기록 | 자진 퇴장·추방·차단은 구분하지 않습니다")
+        await self.audit(member.guild, {"log_id": config["channel_id"]}, embed, avatar=member.display_avatar)
 
     async def on_join(self, member):
         if member.bot:
@@ -1172,6 +1202,20 @@ class OnboardingCommands(commands.Cog):
             "순서를 지정하면 작은 번호부터 표시됩니다. 기본 출생연도 순서는 07년생 → 90년생입니다.",
             "저장한 설정은 유지됩니다. 진행 중인 신입에게 변경을 적용하려면 /입장재시작을 사용하세요."])
 
+    @app_commands.command(name="퇴장로그설정", description="퇴장 로그를 남길 전용 채널을 지정합니다. 입장 로그와 별도 설정입니다")
+    @app_commands.describe(채널="퇴장자의 닉네임·프로필·활동 기록을 남길 관리자용 채널")
+    @app_commands.guild_only()
+    @app_commands.default_permissions(administrator=True)
+    @app_commands.checks.has_permissions(administrator=True)
+    async def departure_settings(self, interaction: discord.Interaction, 채널: discord.TextChannel):
+        await interaction.response.defer(ephemeral=True)
+        perms = 채널.permissions_for(interaction.guild.me)
+        required = ("view_channel", "send_messages", "embed_links", "attach_files")
+        if not all(getattr(perms, key, False) for key in required):
+            raise ValueError("퇴장 로그 채널에서 봇에게 채널 보기·메시지 보내기·링크 첨부·파일 첨부 권한을 허용해주세요.")
+        await self.service.store.put(f"departure_config/{interaction.guild_id}", {"channel_id": 채널.id})
+        await interaction.followup.send(f"퇴장 로그 채널을 {채널.mention}로 지정했습니다. 지금부터 감지되는 회원 퇴장을 기록합니다.", ephemeral=True)
+
     @app_commands.command(name="입장환영설정", description="입장 안내 완료 후 신입을 환영할 채널을 지정합니다")
     @app_commands.describe(채널="환영 인사를 보낼 채널: 기본 회원 역할로 볼 수 있는 채널")
     @app_commands.guild_only()
@@ -1334,8 +1378,8 @@ class OnboardingCommands(commands.Cog):
         await self.actions.manage.callback(self.actions, interaction, "재시작", 대상)
 
 
-async def install(bot, initialize_member, *, format_nickname=None, base_nickname=None):
-    service = Onboarding(bot, initialize_member, format_nickname=format_nickname, base_nickname=base_nickname)
+async def install(bot, initialize_member, *, format_nickname=None, base_nickname=None, last_activity=None):
+    service = Onboarding(bot, initialize_member, format_nickname=format_nickname, base_nickname=base_nickname, last_activity=last_activity)
     bot.add_listener(service.on_join, "on_member_join")
     bot.add_listener(service.on_leave, "on_member_remove")
     bot.add_listener(service.on_interaction, "on_interaction")
