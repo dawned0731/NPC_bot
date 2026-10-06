@@ -374,7 +374,9 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
             state = session()
             state['pending'] = {'stage': stage, 'answers': {'gender': ['male'], 'year': ['2007'], 'interests': ['game'], 'season': ['spring']}}
             await self.service.apply_pending(self.member, state)
-            self.assertEqual(self.service.audit.await_args.args[2], admission_log(self.member, stage == 'done', reason='허용 출생연도 범위 밖'))
+            embed = self.service.audit.await_args.args[2]
+            self.assertEqual(embed.title, '⭕ 입장 완료' if stage == 'done' else '❌ 입장 실패')
+            self.assertIn('2026-09-22 01:30:00', [field.value for field in embed.fields])
 
     async def test_duplicate_starts_create_one_private_thread_and_add_owner(self):
         thread = self.private_thread()
@@ -845,7 +847,38 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state['previous_joined_at'], old['joined_at'])
         state['pending'] = {'stage': 'done', 'answers': {'gender': ['male'], 'year': ['2007'], 'interests': ['game'], 'season': ['spring']}}
         await self.service.apply_pending(self.member, state)
-        self.assertIn('| 재입장 · 이전 입장: 2026-09-01 09:00:00', self.service.audit.await_args.args[2])
+        self.assertIn('재입장 · 이전 입장: 2026-09-01 09:00:00', [field.value for field in self.service.audit.await_args.args[2].fields])
+
+    async def test_admission_embed_links_thread_and_archives_profile_file(self):
+        state = session('done')
+        await self.service.audit_admission(self.member, configured(), True, state)
+        embed = self.service.audit.await_args.args[2]
+        self.assertIn('[스레드로 이동](https://discord.com/channels/200/50)', [f.value for f in embed.fields])
+        channel = MagicMock(spec=discord.TextChannel)
+        channel.send = AsyncMock()
+        self.guild.get_channel.return_value = channel
+        import io
+        attachment = discord.File(io.BytesIO(b'profile bytes'), filename='admission-profile.png')
+        asset = MagicMock()
+        asset.with_format.return_value.to_file = AsyncMock(return_value=attachment)
+        await Onboarding.audit(self.service, self.guild, configured(), embed, avatar=asset)
+        self.assertEqual(channel.send.await_args.kwargs['embed'].thumbnail.url, 'attachment://admission-profile.png')
+        self.assertIs(channel.send.await_args.kwargs['file'], attachment)
+
+    async def test_avatar_download_failure_still_sends_embed(self):
+        await self.service.audit_admission(self.member, configured(), False, reason='역할 권한 없음')
+        embed = self.service.audit.await_args.args[2]
+        self.assertIn('역할 권한 없음', [f.value for f in embed.fields])
+        self.assertIn('스레드 생성 전 또는 기록 없음', [f.value for f in embed.fields])
+        channel = MagicMock(spec=discord.TextChannel)
+        channel.send = AsyncMock()
+        self.guild.get_channel.return_value = channel
+        asset = MagicMock()
+        asset.with_format.return_value.to_file = AsyncMock(side_effect=RuntimeError('CDN unavailable'))
+        with self.assertLogs('onboarding', level='WARNING'):
+            await Onboarding.audit(self.service, self.guild, configured(), embed, avatar=asset)
+        channel.send.assert_awaited_once()
+        self.assertNotIn('file', channel.send.await_args.kwargs)
 
     async def test_failure_log_reason_is_short_and_single_line(self):
         result = admission_log(self.member, False, reason='역할 권한 없음\n관리자 확인')

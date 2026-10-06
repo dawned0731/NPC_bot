@@ -391,6 +391,8 @@ class Onboarding:
             perms = log.permissions_for(guild.me)
             if not perms.view_channel or not perms.send_messages:
                 errors.append("[기록 채널] 봇에게 채널 보기와 메시지 보내기를 허용해주세요.")
+            if not perms.embed_links or not perms.attach_files:
+                errors.append("[기록 채널] Embed 로그와 프로필 보관을 위해 봇에게 링크 첨부·파일 첨부를 허용해주세요.")
             if log.permissions_for(guild.default_role).view_channel:
                 errors.append("[기록 채널] @everyone에게 숨겨주세요.")
             for role in guild.roles:
@@ -407,13 +409,55 @@ class Onboarding:
             preview = "\n".join(errors)[:1400]
             raise ValueError(f"설정에서 {len(errors)}개 문제를 찾았습니다.\n{preview}\n\n/입장검사로 전체 결과를 확인해주세요.")
 
-    async def audit(self, guild, config, content):
+    async def audit(self, guild, config, content, *, avatar=None):
         channel = guild.get_channel(int(config.get("log_id", 0)))
         if channel:
+            attachment = None
             try:
-                await channel.send(content[:1900], allowed_mentions=NO_PING)
+                if isinstance(content, discord.Embed):
+                    if avatar is not None:
+                        try:
+                            attachment = await avatar.with_format("png").to_file(filename="admission-profile.png")
+                            content.set_thumbnail(url="attachment://admission-profile.png")
+                        except Exception:
+                            LOG.warning("Could not archive admission avatar guild=%s", guild.id, exc_info=True)
+                    kwargs = {"embed": content, "allowed_mentions": NO_PING}
+                    if attachment:
+                        kwargs["file"] = attachment
+                    await channel.send(**kwargs)
+                else:
+                    await channel.send(content[:1900], allowed_mentions=NO_PING)
             except discord.HTTPException:
                 LOG.exception("Could not send admission audit guild=%s", guild.id)
+            finally:
+                if attachment:
+                    attachment.close()
+
+    async def audit_admission(self, member, config, success, session=None, reason=""):
+        session = session or {}
+        summary = admission_log(member, success, session.get("joined_at", ""), reason=reason,
+                                returning=session.get("returning", False),
+                                previous_joined_at=session.get("previous_joined_at", ""))
+        embed = discord.Embed(title="⭕ 입장 완료" if success else "❌ 입장 실패",
+                              color=ONBOARDING_COMPLETE_COLOR if success else 0xCC6B6B,
+                              timestamp=datetime.now(timezone.utc))
+        embed.add_field(name="회원", value=f"{member.mention}\n{discord.utils.escape_markdown(member.display_name)}", inline=True)
+        embed.add_field(name="회원 ID", value=str(member.id), inline=True)
+        # Use the same KST date formatting and legacy timestamp fallback as existing logs.
+        details = summary.split("/", 2)[-1].split(" | ")
+        embed.add_field(name="서버 입장 시각 · 한국 시간", value=details[0], inline=False)
+        if not success:
+            embed.add_field(name="실패 사유", value=" ".join((reason or "처리 오류").split())[:500], inline=False)
+        if success and session.get("returning"):
+            embed.add_field(name="재입장 기록", value=details[-1], inline=False)
+        thread_id = session.get("thread_id")
+        if thread_id:
+            embed.add_field(name="개인 입장 스레드", value=f"[스레드로 이동](https://discord.com/channels/{member.guild.id}/{thread_id})", inline=False)
+        else:
+            embed.add_field(name="개인 입장 스레드", value="스레드 생성 전 또는 기록 없음", inline=False)
+        embed.set_thumbnail(url=str(member.display_avatar.url))
+        embed.set_footer(text="사계절, 그 사이 · 입장 기록")
+        await self.audit(member.guild, config, embed, avatar=member.display_avatar)
 
     async def sync_roles(self, member, session, answers, stage):
         config = session["config"]
@@ -456,7 +500,7 @@ class Onboarding:
             await self.sync_roles(member, session, answers, pending["stage"])
         except ValueError as error:
             LOG.warning("Admission role processing failed member=%s: %s", member.id, error)
-            await self.audit(member.guild, session["config"], admission_log(member, False, session.get("joined_at", ""), reason=str(error)))
+            await self.audit_admission(member, session["config"], False, session, reason=str(error))
             raise
         session.update(answers=answers, stage=pending["stage"], pending=None,
                        revision=session["revision"] + 1)
@@ -466,10 +510,8 @@ class Onboarding:
             session.pop("draft_interests", None)
         await self.save(member, session)
         if session["stage"] in {"done", "rejected"}:
-            await self.audit(member.guild, session["config"],
-                             admission_log(member, session["stage"] == "done", session.get("joined_at", ""),
-                                           reason="허용 출생연도 범위 밖", returning=session.get("returning", False),
-                                           previous_joined_at=session.get("previous_joined_at", "")))
+            await self.audit_admission(member, session["config"], session["stage"] == "done", session,
+                                       reason="허용 출생연도 범위 밖")
         if session["stage"] == "done":
             session["completion_notices"] = session.get("completion_notices") or {}
             await self.save(member, session)
@@ -732,8 +774,8 @@ class Onboarding:
         except Exception:
             LOG.exception("Admission start failed guild=%s member=%s", member.guild.id, member.id)
             try:
-                await self.audit(member.guild, await self.config(member.guild.id),
-                                 admission_log(member, False, reason="입장 안내 시작 오류 · 권한/설정 확인"))
+                await self.audit_admission(member, await self.config(member.guild.id), False,
+                                           await self.session(member.guild.id, member.id), reason="입장 안내 시작 오류 · 권한/설정 확인")
             except Exception:
                 LOG.exception("Admission start failure could not be reported")
 
@@ -892,8 +934,8 @@ class Onboarding:
             LOG.exception("Admission interaction failed")
             await interaction.followup.send("처리를 완료하지 못했습니다. 진행 내용은 저장되며, 대기 채널에서 이어하기를 눌러 다시 시도할 수 있습니다. 계속 실패하면 서버장에게 문의해주세요.", ephemeral=True)
             try:
-                await self.audit(interaction.guild, await self.config(interaction.guild.id),
-                                 admission_log(interaction.user, False, reason="입장 처리 오류 · 봇 실행 로그 확인"))
+                await self.audit_admission(interaction.user, await self.config(interaction.guild.id), False,
+                                           await self.session(interaction.guild.id, interaction.user.id), reason="입장 처리 오류 · 봇 실행 로그 확인")
             except Exception:
                 LOG.exception("Admission error reporting failed")
 
