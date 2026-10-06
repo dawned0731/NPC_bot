@@ -63,6 +63,57 @@ class RecoveryTests(unittest.TestCase):
 
 
 class CallbackTests(unittest.IsolatedAsyncioTestCase):
+    async def test_attend_send_omits_absent_view_and_retry_does_not_reward(self):
+        tree = ast.parse(Path('main.py').read_text(encoding='utf-8'))
+        node = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == 'attend')
+        node.decorator_list = []
+        from datetime import timedelta
+        import time
+        now = datetime.now(timezone.utc)
+        record = {'last_date': (now - timedelta(days=1)).strftime('%Y-%m-%d'),
+                  'streak': 4, 'total_days': 4, 'weekly': {}, 'monthly': {}}
+        xp = {'exp': 0}
+        writes, sent = [], []
+
+        async def save(updates):
+            writes.append(updates)
+            record.update(updates['attendance_data/42'])
+            xp.update(updates['exp_data/42'])
+
+        async def send(**kwargs):
+            # Webhook.send accepts an omitted view, but rejects explicit None.
+            if 'view' in kwargs:
+                self.assertIsInstance(kwargs['view'], discord.ui.View)
+            sent.append(kwargs)
+
+        env = dict(discord=discord, datetime=datetime, timedelta=timedelta, time=time,
+                   KST=timezone.utc, ATTENDANCE_EXP_REWARD=1200, SEASON_MAX_LEVEL=100,
+                   get_week_key_kst=lambda n: 'week', get_month_key_kst=lambda n: 'month',
+                   aseason_xp_enabled=AsyncMock(return_value=True),
+                   get_user_state_lock=lambda uid: asyncio.Lock(),
+                   normalize_attendance_record=lambda r: r, _safe_int=lambda n, d: int(n),
+                   aget_attendance_user=AsyncMock(side_effect=lambda uid: copy.deepcopy(record)),
+                   aget_user_exp=AsyncMock(side_effect=lambda uid: copy.deepcopy(xp)),
+                   aget_effective_season_state=AsyncMock(return_value={'current_season_id': 'fall'}),
+                   recovery_offer=recovery_offer, recovery_view=recovery_view,
+                   attendance_embed=attendance_embed, calculate_level=level,
+                   get_level_progress=lambda exp: (level(exp), exp % 1100, 1100, (exp % 1100)/1100),
+                   afirebase_root_update_strict=save, ATTENDANCE_DB_KEY='attendance_data',
+                   aget_guild_config=AsyncMock(return_value={}), get_channel_from_cfg=AsyncMock(return_value=None),
+                   LEVELUP_ANNOUNCE_CHANNEL=0, update_role_and_nick=AsyncMock())
+        exec(compile(ast.Module(body=[node], type_ignores=[]), 'main.py', 'exec'), env)
+        interaction = SimpleNamespace(user=SimpleNamespace(id=42, display_name='테스트',
+                                      display_avatar=SimpleNamespace(url='https://example.com/a.png')),
+                                      guild=SimpleNamespace(id=1), response=SimpleNamespace(defer=AsyncMock()),
+                                      followup=SimpleNamespace(send=send))
+        await env['attend'](interaction)
+        await env['attend'](interaction)
+        self.assertEqual(len(writes), 1)
+        self.assertEqual(xp['exp'], 1200)
+        self.assertEqual(record['streak'], 5)
+        self.assertEqual(len(sent), 2)
+        self.assertTrue(all('view' not in message for message in sent))
+
     async def test_five_days_allowed_six_days_blocked_in_ui_and_server(self):
         for missed in (5, 6):
             record = RecoveryTests().record()

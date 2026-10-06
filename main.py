@@ -2913,7 +2913,7 @@ async def attend(interaction: discord.Interaction):
             return await interaction.followup.send(
                 embed=attendance_embed(interaction.user, ud, ue.get("exp", 0),
                                        get_level_progress, SEASON_MAX_LEVEL, already=True),
-                view=recovery_view(uid, ud))
+                **({"view": view} if (view := recovery_view(uid, ud)) is not None else {}))
 
         season = await aget_effective_season_state()
         ud["recovery"] = recovery_offer(ud, today_str, season.get("current_season_id"))
@@ -2967,7 +2967,7 @@ async def attend(interaction: discord.Interaction):
     await interaction.followup.send(
         embed=attendance_embed(interaction.user, ud, ue.get("exp", 0),
                                get_level_progress, SEASON_MAX_LEVEL),
-        view=recovery_view(uid, ud))
+        **({"view": view} if (view := recovery_view(uid, ud)) is not None else {}))
 
 
 @bot.listen("on_interaction")
