@@ -27,6 +27,62 @@ LABELS = {"gender": "성별을 선택해주세요", "year": "출생연도를 선
           "interests": "관심사를 하나 이상 선택해주세요 (복수 선택 가능)", "season": "마음에 드는 계절을 골라주세요."}
 TERMINAL = {"done", "rejected"}
 KST = timezone(timedelta(hours=9))
+ONBOARDING_COLOR = 0x86B89A
+ONBOARDING_COMPLETE_COLOR = 0x48A878
+ONBOARDING_NOTICE_COLOR = 0xC7A46A
+
+
+def create_onboarding_embed(member, session, content):
+    """Presentation only: keep session transitions, component IDs and storage unchanged."""
+    stage = session["stage"]
+    name = discord.utils.escape_markdown(member.display_name)[:170]
+    title = f"🌿 {name}님의 입장 안내"
+    color = ONBOARDING_COLOR
+    footer = "사계절, 그 사이 · 입장 안내"
+    steps = {"gender": (1, "🚻 성별", "먼저 성별을 선택해주세요."),
+             "year": (2, "🎂 출생연도", "출생연도를 선택해주세요."),
+             "interests": (3, "💬 관심사", "서버에서 주로 이야기하고 싶은 관심사를 선택해주세요.")}
+    if stage in steps:
+        number, heading, prompt = steps[stage]
+        dots = " ".join("●" if i <= number else "○" for i in range(1, 4))
+        content = f"**기본 정보 · {number} / 3**\n`{dots}`"
+        completed = ["성별", "출생연도"][:number - 1]
+        if completed:
+            content += "\n\n" + "\n".join(f"✅ {label} 선택 완료" for label in completed)
+        content += f"\n\n**{heading}**\n{prompt}"
+        if stage == "gender":
+            title = f"🌿 {name}님, 반갑습니다!"
+            content = "사계절, 그 사이에서 활동하기 전\n간단한 입장 절차를 진행해주세요.\n\n약 1분 정도면 완료됩니다.\n\n" + content
+        if stage == "interests":
+            selected = session.get("draft_interests") or []
+            options = session["config"]["questions"]["interests"]
+            labels = [discord.utils.escape_markdown(options[key]["label"])[:80] for key in selected]
+            content += "\n여러 항목을 고른 뒤 **관심사 선택 확인**을 눌러주세요.\n\n현재 선택: " + (", ".join(labels) or "없음")
+        content += "\n\n-# 선택한 내용은 입장 완료 전까지 다시 변경할 수 있습니다."
+    elif stage == "nickname":
+        title = f"🌿 {name}님의 닉네임 설정"
+    elif stage == "season":
+        title = f"🌿 {name}님은 어떤 계절을 좋아하세요?"
+    elif stage == "review":
+        title = "🌿 선택한 정보를 확인해주세요"
+    elif stage == "tour":
+        title = f"🌿 주요 채널 소개 · {session.get('tour_index', 1)} / 4"
+    elif stage == "done":
+        title = "🍀 입장 절차가 완료되었습니다!"
+        color = ONBOARDING_COMPLETE_COLOR
+        footer = "사계절, 그 사이 · 입장 완료"
+        content = ("✅ 성별 선택 완료\n✅ 출생연도 선택 완료\n✅ 관심사 선택 완료\n\n"
+                   "모든 입장 절차가 완료되었습니다.\n\n이제 **사계절, 그 사이**의 서버 채널을 이용하실 수 있습니다.\n"
+                   "천천히 둘러보시고 편하게 이야기 나눠주세요.\n\n**사계절 사이에서 좋은 시간 보내시길 바랍니다.**\n\n"
+                   + content)
+    elif stage in {"reject_confirm", "rejected"}:
+        title = "입장 조건을 확인해주세요" if stage == "reject_confirm" else "입장이 제한되었습니다"
+        color = ONBOARDING_NOTICE_COLOR
+    embed = discord.Embed(title=title, description=content, color=color)
+    embed.set_thumbnail(url=str(member.display_avatar.url))
+    embed.set_footer(text=footer)
+    return embed
+
 SERVER_INTRO = (
     "🌿 **사계절, 그 사이를 소개할게요**\n\n"
     "이곳은 다양한 게임을 함께 즐기고, 일상을 나누며 편하게 친해지는 종합게임 서버예요. 같이 게임할 친구를 만나기도 하고, 가끔은 정모로 얼굴을 보며 시간을 보내기도 해요.\n\n"
@@ -267,6 +323,7 @@ class Onboarding:
             errors.append("[봇 권한] 역할 관리 권한이 없습니다. 역할 위치와는 별도 설정입니다.")
         if lobby:
             required = {"view_channel": "채널 보기", "send_messages": "메시지 보내기",
+                        "embed_links": "링크 첨부(Embed 표시)",
                         "read_message_history": "메시지 기록 보기", "create_private_threads": "비공개 스레드 생성",
                         "send_messages_in_threads": "스레드에서 메시지 보내기", "manage_threads": "스레드 관리"}
             perms = lobby.permissions_for(guild.me)
@@ -551,8 +608,7 @@ class Onboarding:
                 f"<#{v['channel_id']}> — {v['description']}" for _, v in sorted(session["config"]["introductions"].items()))
             if (session.get("completion_notices") or {}).get("dm") == "failed":
                 content += "\n\n개인 DM을 보내지 못해 명령어 안내를 여기에 남겨드려요.\n\n" + MEMBER_GUIDE
-        if stage in {*LABELS, "nickname", "review"}:
-            content = "환영합니다! 성별 → 출생연도 → 관심사 선택을 마치면 서버 채널을 이용할 수 있어요.\n\n" + content
+        embed = create_onboarding_embed(member, session, content)
         message = None
         if session.get("message_id"):
             try:
@@ -561,9 +617,9 @@ class Onboarding:
                 pass
         view = self.view(member.id, session) if stage not in TERMINAL else None
         if message:
-            await message.edit(content=content, view=view, allowed_mentions=NO_PING)
+            await message.edit(content=None, embed=embed, view=view, allowed_mentions=NO_PING)
         else:
-            message = await thread.send(content, view=view, allowed_mentions=NO_PING)
+            message = await thread.send(embed=embed, view=view, allowed_mentions=NO_PING)
             session["message_id"] = message.id
             await self.save(member, session)
         if stage in TERMINAL:

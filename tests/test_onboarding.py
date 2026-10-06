@@ -110,6 +110,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.member.roles = [self.roles[0], self.roles[8]]  # unrelated role
         self.member.mention = "<@100>"
         self.member.display_name = "신입"
+        self.member.display_avatar.url = 'https://cdn.discordapp.com/embed/avatars/0.png'
         self.member.send = AsyncMock()
         self.guild = MagicMock(spec=discord.Guild)
         self.guild.id = 200
@@ -398,7 +399,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         message = await thread.fetch_message(51)
         kwargs = message.edit.await_args.kwargs
         self.assertIsNone(kwargs["view"])
-        self.assertTrue(all(f"<#{41+i}>" in kwargs["content"] for i in range(4)))
+        self.assertTrue(all(f"<#{41+i}>" in kwargs["embed"].description for i in range(4)))
         thread.edit.assert_awaited_once_with(locked=True, archived=True)
 
     async def test_resume_archived_thread_after_restart_without_new_thread(self):
@@ -695,7 +696,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.bot.get_channel.return_value = thread
         await Onboarding.render(self.service, self.member, saved)
         message = await thread.fetch_message(saved['message_id'])
-        self.assertIn('이후 닉네임 변경은 <@300> 님에게 문의해주세요.', message.edit.await_args.kwargs['content'])
+        self.assertIn('이후 닉네임 변경은 <@300> 님에게 문의해주세요.', message.edit.await_args.kwargs['embed'].description)
 
     async def test_nickname_modal_rejects_invalid_other_member_and_missing_permission(self):
         await self.service.save(self.member, session('nickname'))
@@ -822,7 +823,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.bot.get_channel.return_value = thread
         await Onboarding.render(self.service, self.member, state)
         message = await thread.fetch_message(state['message_id'])
-        self.assertIn('/퀘스트', message.edit.await_args.kwargs['content'])
+        self.assertIn('/퀘스트', message.edit.await_args.kwargs['embed'].description)
 
     async def test_welcome_settings_persists_selected_channel(self):
         channel = MagicMock(spec=discord.TextChannel)
@@ -880,20 +881,55 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         state = session('reject_confirm')
         await Onboarding.render(self.service, self.member, state)
         message = await thread.fetch_message(state['message_id'])
-        content = message.edit.await_args.kwargs['content']
+        content = message.edit.await_args.kwargs['embed'].description
         self.assertIn('\n\n입장 관련 문의는 <@300>', content)
         self.assertEqual([item.custom_id for item in self.service.view(100, state).children],
                          ['npcob:100:1:confirm'])
 
-    async def test_question_messages_keep_common_intro_separate(self):
+    async def test_question_embeds_keep_message_id_and_show_progress(self):
         thread = self.private_thread()
         self.bot.get_channel.return_value = thread
-        for stage in ('gender', 'year', 'interests', 'review'):
+        for number, stage in enumerate(('gender', 'year', 'interests'), 1):
             state = session(stage)
             await Onboarding.render(self.service, self.member, state)
             message = await thread.fetch_message(state['message_id'])
-            content = message.edit.await_args.kwargs['content']
-            self.assertTrue(content.startswith('환영합니다! 성별 → 출생연도 → 관심사 선택을 마치면 서버 채널을 이용할 수 있어요.\n\n'))
+            content = message.edit.await_args.kwargs['embed'].description
+            self.assertIn(f'**기본 정보 · {number} / 3**', content)
+            self.assertEqual(state['message_id'], 51)
+            self.assertIsNone(message.edit.await_args.kwargs['content'])
+            embed = message.edit.await_args.kwargs['embed']
+            self.assertIn('신입', embed.title)
+            self.assertEqual(embed.thumbnail.url, self.member.display_avatar.url)
+            self.assertEqual(embed.footer.text, '사계절, 그 사이 · 입장 안내')
+        thread.send.assert_not_awaited()
+
+    async def test_missing_question_message_is_recreated_as_embed(self):
+        thread = self.private_thread()
+        self.bot.get_channel.return_value = thread
+        thread.fetch_message.side_effect = discord.NotFound(SimpleNamespace(status=404, reason='Not Found'), 'Missing')
+        thread.send.return_value = SimpleNamespace(id=75)
+        state = session('year')
+        await Onboarding.render(self.service, self.member, state)
+        self.assertEqual(state['message_id'], 75)
+        self.assertIsInstance(thread.send.await_args.kwargs['embed'], discord.Embed)
+        self.assertIn('2 / 3', thread.send.await_args.kwargs['embed'].description)
+
+    async def test_all_remaining_stages_use_embed_without_changing_data(self):
+        thread = self.private_thread()
+        self.bot.get_channel.return_value = thread
+        for stage in ('nickname', 'season', 'review', 'tour', 'done', 'reject_confirm', 'rejected'):
+            state = session(stage)
+            before = copy.deepcopy(state)
+            await Onboarding.render(self.service, self.member, state)
+            message = await thread.fetch_message(state['message_id'])
+            kwargs = message.edit.await_args.kwargs
+            self.assertEqual(state, before)
+            self.assertIsInstance(kwargs['embed'], discord.Embed)
+            self.assertLessEqual(len(kwargs['embed']), 6000)
+            self.assertEqual(kwargs['view'] is None, stage in ('done', 'rejected'))
+            if stage == 'done':
+                self.assertEqual(kwargs['embed'].title, '🍀 입장 절차가 완료되었습니다!')
+                self.assertEqual(kwargs['embed'].footer.text, '사계절, 그 사이 · 입장 완료')
 
     async def test_edit_interest_replaces_confirmed_roles_only_after_confirm(self):
         state = session('review')
