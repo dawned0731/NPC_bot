@@ -4,6 +4,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from activity_ui import build_activity, completion_embed, season_key
 from onboarding import MEMBER_GUIDE, SERVER_INTRO
+from datetime import datetime, timezone
+from unittest.mock import AsyncMock
+import discord
+import logging
 
 
 class ActivityTests(unittest.TestCase):
@@ -72,3 +76,62 @@ class ActivityTests(unittest.TestCase):
         self.assertIn('/활동', MEMBER_GUIDE)
         self.assertNotIn('/퀘스트', MEMBER_GUIDE + SERVER_INTRO)
         self.assertIn('+300 XP', completion_embed('디키구', 300, {}).description)
+
+
+class ActivityCommandTests(unittest.IsolatedAsyncioTestCase):
+    async def run_command(self, fail_send=False, missing=False):
+        tree = ast.parse(Path('main.py').read_text(encoding='utf-8'))
+        node = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == 'activity')
+        node.decorator_list = []
+        opened = []
+
+        async def send(**kwargs):
+            if missing:
+                self.assertNotIn('file', kwargs)
+                return
+            image = kwargs['file']
+            opened.append(image)
+            self.assertFalse(image.fp.closed)
+            self.assertEqual(image.fp.read(8), b'\x89PNG\r\n\x1a\n')
+            self.assertEqual(kwargs['embed'].image.url, 'attachment://activity-banner.png')
+            if fail_send:
+                raise RuntimeError('simulated network failure')
+
+        def builder(*args, **kwargs):
+            embed, path = build_activity(*args, **kwargs)
+            return embed, path.with_name('missing-test-banner.png') if missing else path
+
+        env = dict(discord=discord, datetime=datetime, KST=timezone.utc, logging=logging,
+                   aget_user_mission=AsyncMock(return_value={}),
+                   aget_attendance_user=AsyncMock(return_value={}),
+                   aget_user_exp=AsyncMock(return_value={'exp': 1200}),
+                   aget_effective_season_state=AsyncMock(return_value={'current_season_type': 'fall', 'status': 'regular'}),
+                   strip_title_suffix=lambda name: name, build_activity=builder,
+                   get_level_progress=lambda exp: (2, 100, 1100, 100/1100),
+                   MISSION_REQUIRED_MESSAGES=30, MISSION_EXP_REWARD=300,
+                   REPEAT_VC_REQUIRED_MINUTES=15, REPEAT_VC_EXP_REWARD=150,
+                   REPEAT_VC_MIN_PEOPLE=5, ATTENDANCE_EXP_REWARD=1200, SEASON_MAX_LEVEL=100)
+        exec(compile(ast.Module(body=[node], type_ignores=[]), 'main.py', 'exec'), env)
+        interaction = SimpleNamespace(user=SimpleNamespace(id=42, display_name='테스트',
+                                      display_avatar=SimpleNamespace(url='https://example.com/a.png')),
+                                      response=SimpleNamespace(defer=AsyncMock()),
+                                      followup=SimpleNamespace(send=AsyncMock(side_effect=send)))
+        if fail_send:
+            with self.assertRaisesRegex(RuntimeError, 'simulated'):
+                await env['activity'](interaction)
+        else:
+            await env['activity'](interaction)
+        interaction.followup.send.assert_awaited_once()
+        if not missing:
+            self.assertEqual(len(opened), 1)
+            self.assertTrue(opened[0].fp.closed)
+
+    async def test_real_banner_file_sends_and_closes(self):
+        await self.run_command()
+
+    async def test_file_closes_when_send_fails(self):
+        await self.run_command(fail_send=True)
+
+    async def test_missing_banner_still_sends_journal(self):
+        with self.assertLogs(level='WARNING'):
+            await self.run_command(missing=True)

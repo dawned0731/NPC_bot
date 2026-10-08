@@ -2809,8 +2809,11 @@ async def activity(interaction: discord.Interaction):
     )
     if banner.is_file():
         embed.set_image(url="attachment://activity-banner.png")
-        with discord.File(banner, filename="activity-banner.png") as image:
+        image = discord.File(banner, filename="activity-banner.png")
+        try:
             await interaction.followup.send(embed=embed, file=image)
+        finally:
+            image.close()
     else:
         logging.warning("Activity banner missing: %s", banner)
         await interaction.followup.send(embed=embed)
