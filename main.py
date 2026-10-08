@@ -17,6 +17,7 @@ import pytz
 import aiohttp
 from onboarding import install as install_onboarding
 from activity_ui import build_activity, completion_embed
+from runtime_safety import daily_mission, mark_operation, failure_message
 from attendance_ui import recovery_offer, apply_recovery, attendance_embed, recovery_view
 
 from threading import Thread
@@ -735,9 +736,8 @@ async def aget_user_exp(uid: str):
 
 async def aget_user_mission(uid: str, today: str):
     def _get():
-        base = {"date": today, "text": {"count": 0, "completed": False}, "repeat_vc": {"minutes": 0}}
         val = db.reference("mission_data").child(uid).get()
-        return val or base
+        return daily_mission(val, today)
     return await asyncio.to_thread(_get)
 
 # =========================
@@ -1789,13 +1789,7 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
         retry_after = _safe_float(getattr(original, "retry_after", 0), 0)
         message = f"❌ 잠시 후 다시 시도해주세요. ({retry_after:.1f}초)"
     else:
-        logging.error(
-            "[app-command] unhandled error command=%s error=%r",
-            getattr(getattr(interaction, "command", None), "name", "unknown"),
-            original,
-            exc_info=(type(original), original, original.__traceback__),
-        )
-        message = "❌ 명령어 처리 중 오류가 발생했습니다. 관리자 로그를 확인해주세요."
+        message = failure_message(interaction, original)
 
     try:
         if interaction.response.is_done():
@@ -1831,7 +1825,7 @@ async def on_ready():
             print(f"❌ 슬래시 커맨드 동기화 실패: {e!r}")
 
     # 4) 백그라운드 태스크 안전 시작(중복 방지)
-    for task in (voice_xp_task, reset_daily_missions, repeat_vc_mission_task, inactive_user_log_task, voice_count_channel_task, season_transition_task):
+    for task in (voice_xp_task, repeat_vc_mission_task, inactive_user_log_task, voice_count_channel_task, season_transition_task):
         try:
             if not task.is_running():
                 task.start()
@@ -1963,25 +1957,26 @@ async def inactive_user_log_task():
                 f"✅ 현재 {INACTIVE_KICK_DAYS}일 이상 미접속 중인 사용자가 없습니다."
             )
         
-@tasks.loop(time=dtime(hour=0, minute=0, tzinfo=pytz.FixedOffset(540)))
-@guard_background_task("reset_daily_missions")
-async def reset_daily_missions():
-    """매일 자정(KST)에 일일 미션 데이터를 초기화합니다."""
-    try:
-        await asave_mission_data({})
-        save_json(MISSION_PATH, {})
-        print("🔁 일일 미션 초기화 완료")
-    except Exception as e:
-        logging.exception(f"[daily-mission-reset] failed: {e}")
+# Daily records are replaced per member under their lock, never deleted at midnight.
+_ACTIVITY_TOUCH_TS = {}
+
+
+async def touch_member_activity(uid):
+    """Persist one activity timestamp; no XP or history, at most once/minute here."""
+    async with get_user_state_lock(uid):
+        now = time.time()
+        if 0 <= now - _ACTIVITY_TOUCH_TS.get(uid, 0) < 60:
+            return
+        await afirebase_root_update_strict({f"exp_data/{uid}/last_activity": now})
+        _ACTIVITY_TOUCH_TS[uid] = now
+
 
 @tasks.loop(seconds=VOICE_COOLDOWN)
 @guard_background_task("voice_xp")
 async def voice_xp_task():
     """음성 채널 경험치 태스크."""
-    if not await aseason_xp_enabled():
-        return
+    xp_enabled = await aseason_xp_enabled()
 
-    now_ts = time.time()
     for guild in bot.guilds:
         try:
             cfg = await aget_guild_config(guild.id)
@@ -2008,6 +2003,9 @@ async def voice_xp_task():
                     continue
                 try:
                     uid = str(member.id)
+                    if not xp_enabled:
+                        await touch_member_activity(uid)
+                        continue
                     gain = random.randint(VOICE_MIN_XP, VOICE_MAX_XP)
                     if is_special:
                         gain = max(1, int(gain * 0.2))
@@ -2018,7 +2016,7 @@ async def voice_xp_task():
                         user_data["exp"] = max(0, _safe_int(user_data.get("exp", 0), 0)) + gain
                         if not is_special:
                             user_data["voice_minutes"] = max(0, _safe_int(user_data.get("voice_minutes", 0), 0)) + 1
-                        user_data["last_activity"] = now_ts
+                        user_data["last_activity"] = time.time()
                         new_level = calculate_level(user_data["exp"])
                         user_data["level"] = new_level
                         await asave_user_exp(uid, user_data)
@@ -2056,7 +2054,6 @@ async def repeat_vc_mission_task():
     if not await aseason_xp_enabled():
         return
 
-    today = datetime.now(KST).strftime("%Y-%m-%d")
     for guild in bot.guilds:
         try:
             cfg = await aget_guild_config(guild.id)
@@ -2080,6 +2077,7 @@ async def repeat_vc_mission_task():
                 new_level = prev_level = 1
                 try:
                     async with get_user_state_lock(uid):
+                        today = datetime.now(KST).strftime("%Y-%m-%d")
                         user_m = await aget_user_mission(uid, today)
                         if not isinstance(user_m, dict) or user_m.get("date") != today:
                             user_m = {
@@ -2126,12 +2124,6 @@ async def repeat_vc_mission_task():
                 except Exception as e:
                     logging.exception(f"[repeat_vc_mission] uid={uid} error: {e}")
 
-    # 로컬 파일은 DB의 최신 상태를 읽어 백업만 하며 DB로 다시 덮어쓰지 않습니다.
-    try:
-        latest = await aload_mission_data()
-        save_json(MISSION_PATH, latest if isinstance(latest, dict) else {})
-    except Exception as e:
-        logging.warning(f"[repeat_vc_mission] local backup failed: {e!r}")
 
 @tasks.loop(seconds=60)
 @guard_background_task("voice_count_channel")
@@ -2217,6 +2209,7 @@ async def on_message(message):
                     logging.exception(f"[role] add_roles error: {e}")
 
         if not await aseason_xp_enabled():
+            await touch_member_activity(str(message.author.id))
             return
 
         uid = str(message.author.id)
@@ -2235,7 +2228,7 @@ async def on_message(message):
             if now_ts - last_text_xp_at >= COOLDOWN_SECONDS:
                 user_data["exp"] = max(0, _safe_int(user_data.get("exp", 0), 0)) + random.randint(1, 30)
                 user_data["last_text_xp_at"] = now_ts
-            user_data["last_activity"] = now_ts
+            user_data["last_activity"] = time.time()
 
             today = datetime.now(KST).strftime("%Y-%m-%d")
             user_m = await aget_user_mission(uid, today)
@@ -2781,6 +2774,7 @@ async def info(interaction: discord.Interaction):
 @bot.tree.command(name="활동", description="오늘의 출석·대화·음성 활동 일지를 확인합니다.")
 async def activity(interaction: discord.Interaction):
     await interaction.response.defer()
+    mark_operation(interaction, "활동 조회", "read_only")
     uid = str(interaction.user.id)
     today = datetime.now(KST).strftime("%Y-%m-%d")
     um = await aget_user_mission(uid, today)
@@ -2807,16 +2801,26 @@ async def activity(interaction: discord.Interaction):
         voice_people=REPEAT_VC_MIN_PEOPLE, attendance_reward=ATTENDANCE_EXP_REWARD,
         max_level=SEASON_MAX_LEVEL,
     )
-    if banner.is_file():
-        embed.set_image(url="attachment://activity-banner.png")
-        image = discord.File(banner, filename="activity-banner.png")
-        try:
+    mark_operation(interaction, "활동 화면 전송")
+    image = None
+    try:
+        if banner.is_file():
+            image = discord.File(banner, filename="activity-banner.png")
+            embed.set_image(url="attachment://activity-banner.png")
             await interaction.followup.send(embed=embed, file=image)
-        finally:
+            return
+    except (OSError, discord.HTTPException) as error:
+        # Retry without an attachment only when rejection is definitive. A timeout
+        # or a 5xx may already have delivered the message, so do not duplicate it.
+        if isinstance(error, discord.HTTPException) and error.status not in (400, 403, 413):
+            raise
+        failure_message(interaction, error)
+    finally:
+        if image is not None:
             image.close()
-    else:
-        logging.warning("Activity banner missing: %s", banner)
-        await interaction.followup.send(embed=embed)
+    embed.set_image(url=None)
+    logging.warning("Activity banner unavailable; sending journal without attachment")
+    await interaction.followup.send(embed=embed)
 
 
 @app_commands.guild_only()
@@ -2885,6 +2889,7 @@ async def ranking(interaction: discord.Interaction):
 @bot.tree.command(name="출석", description="오늘의 출석을 기록합니다.")
 async def attend(interaction: discord.Interaction):
     await interaction.response.defer()
+    mark_operation(interaction, "출석 조회", "not_saved")
     uid = str(interaction.user.id)
     now = datetime.now(KST)
     today_str = now.strftime("%Y-%m-%d")
@@ -2901,6 +2906,7 @@ async def attend(interaction: discord.Interaction):
         prev_last = ud.get("last_date", "")
 
         if prev_last == today_str:
+            mark_operation(interaction, "출석 결과 재표시", "saved")
             ue = await aget_user_exp(uid)
             return await interaction.followup.send(
                 embed=attendance_embed(interaction.user, ud, ue.get("exp", 0),
@@ -2935,7 +2941,9 @@ async def attend(interaction: discord.Interaction):
             # 프리시즌에는 EXP 전체 레코드를 덮어쓰지 않고 활동 시각만 갱신합니다.
             attendance_updates[f"exp_data/{uid}/last_activity"] = time.time()
 
+        mark_operation(interaction, "출석 저장", "saving")
         await afirebase_root_update_strict(attendance_updates)
+        mark_operation(interaction, "출석 후처리", "saved")
         level_up = final_level > prev_level
 
     if level_up:
@@ -2956,6 +2964,7 @@ async def attend(interaction: discord.Interaction):
         await maybe_award_level100(interaction.user, final_level, reason="attendance")
 
     await update_role_and_nick(interaction.user, final_level)
+    mark_operation(interaction, "출석 결과 전송")
     await interaction.followup.send(
         embed=attendance_embed(interaction.user, ud, ue.get("exp", 0),
                                get_level_progress, SEASON_MAX_LEVEL),
@@ -2974,6 +2983,7 @@ async def attendance_recovery_interaction(interaction: discord.Interaction):
     if str(interaction.user.id) != uid or interaction.guild is None:
         return await interaction.response.send_message("본인의 출석만 복구할 수 있어요.", ephemeral=True)
     await interaction.response.defer()
+    mark_operation(interaction, "출석 복구 확인", "not_saved")
     try:
         async with get_user_state_lock(uid):
             today = datetime.now(KST).strftime("%Y-%m-%d")
@@ -2983,10 +2993,12 @@ async def attendance_recovery_interaction(interaction: discord.Interaction):
             ue = await aget_user_exp(uid)
             season = await aget_effective_season_state()
             ud, ue = apply_recovery(ud, ue, today, season.get("current_season_id"), calculate_level)
+            mark_operation(interaction, "출석 복구 저장", "saving")
             await afirebase_root_update_strict({
                 f"{ATTENDANCE_DB_KEY}/{uid}": ud,
                 f"exp_data/{uid}": ue,
             })
+            mark_operation(interaction, "출석 복구 후처리", "saved")
             # Keep role/nickname refresh ordered with other XP changes.
             try:
                 await update_role_and_nick(interaction.user, ue["level"])
@@ -2997,9 +3009,8 @@ async def attendance_recovery_interaction(interaction: discord.Interaction):
                                    get_level_progress, SEASON_MAX_LEVEL), view=None)
     except ValueError as error:
         await interaction.followup.send(str(error), ephemeral=True)
-    except Exception:
-        logging.exception("attendance recovery failed uid=%s", uid)
-        await interaction.followup.send("처리 결과를 확인하지 못했어요. /출석으로 현재 기록을 확인한 뒤 다시 시도해주세요.", ephemeral=True)
+    except Exception as error:
+        await interaction.followup.send(failure_message(interaction, error), ephemeral=True)
 
 @app_commands.guild_only()
 @bot.tree.command(name="출석랭킹", description="출석 랭킹을 확인합니다.")

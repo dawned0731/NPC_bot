@@ -1,3 +1,4 @@
+from runtime_safety import mark_operation, failure_message
 import ast
 import asyncio
 import copy
@@ -63,7 +64,7 @@ class RecoveryTests(unittest.TestCase):
 
 
 class CallbackTests(unittest.IsolatedAsyncioTestCase):
-    async def test_attend_send_omits_absent_view_and_retry_does_not_reward(self):
+    async def test_attend_send_omits_absent_view_and_retry_does_not_reward(self, fail_at=None):
         tree = ast.parse(Path('main.py').read_text(encoding='utf-8'))
         node = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == 'attend')
         node.decorator_list = []
@@ -76,6 +77,8 @@ class CallbackTests(unittest.IsolatedAsyncioTestCase):
         writes, sent = [], []
 
         async def save(updates):
+            if fail_at == 'save':
+                raise RuntimeError('unknown database result')
             writes.append(updates)
             record.update(updates['attendance_data/42'])
             xp.update(updates['exp_data/42'])
@@ -85,8 +88,10 @@ class CallbackTests(unittest.IsolatedAsyncioTestCase):
             if 'view' in kwargs:
                 self.assertIsInstance(kwargs['view'], discord.ui.View)
             sent.append(kwargs)
+            if fail_at == 'send' and len(sent) == 1:
+                raise RuntimeError('display failed')
 
-        env = dict(discord=discord, datetime=datetime, timedelta=timedelta, time=time,
+        env = dict(mark_operation=mark_operation, failure_message=failure_message, discord=discord, datetime=datetime, timedelta=timedelta, time=time,
                    KST=timezone.utc, ATTENDANCE_EXP_REWARD=1200, SEASON_MAX_LEVEL=100,
                    get_week_key_kst=lambda n: 'week', get_month_key_kst=lambda n: 'month',
                    aseason_xp_enabled=AsyncMock(return_value=True),
@@ -102,17 +107,31 @@ class CallbackTests(unittest.IsolatedAsyncioTestCase):
                    aget_guild_config=AsyncMock(return_value={}), get_channel_from_cfg=AsyncMock(return_value=None),
                    LEVELUP_ANNOUNCE_CHANNEL=0, update_role_and_nick=AsyncMock())
         exec(compile(ast.Module(body=[node], type_ignores=[]), 'main.py', 'exec'), env)
-        interaction = SimpleNamespace(user=SimpleNamespace(id=42, display_name='테스트',
+        interaction = SimpleNamespace(extras={}, user=SimpleNamespace(id=42, display_name='테스트',
                                       display_avatar=SimpleNamespace(url='https://example.com/a.png')),
                                       guild=SimpleNamespace(id=1), response=SimpleNamespace(defer=AsyncMock()),
                                       followup=SimpleNamespace(send=send))
-        await env['attend'](interaction)
+        if fail_at:
+            with self.assertRaises(RuntimeError):
+                await env['attend'](interaction)
+            self.assertEqual(interaction.extras['operation_outcome'], 'saving' if fail_at == 'save' else 'saved')
+            if fail_at == 'save':
+                self.assertEqual(xp['exp'], 0)
+                return
+        else:
+            await env['attend'](interaction)
         await env['attend'](interaction)
         self.assertEqual(len(writes), 1)
         self.assertEqual(xp['exp'], 1200)
         self.assertEqual(record['streak'], 5)
         self.assertEqual(len(sent), 2)
         self.assertTrue(all('view' not in message for message in sent))
+
+    async def test_saved_attendance_display_failure_retry_does_not_reward_again(self):
+        await self.test_attend_send_omits_absent_view_and_retry_does_not_reward(fail_at='send')
+
+    async def test_attendance_write_failure_reports_uncertain_outcome(self):
+        await self.test_attend_send_omits_absent_view_and_retry_does_not_reward(fail_at='save')
 
     async def test_five_days_allowed_six_days_blocked_in_ui_and_server(self):
         for missed in (5, 6):
@@ -151,7 +170,7 @@ class CallbackTests(unittest.IsolatedAsyncioTestCase):
             xp.clear()
             xp.update(updates['exp_data/42'])
 
-        env = dict(discord=discord, datetime=datetime, KST=timezone.utc, logging=logging,
+        env = dict(mark_operation=mark_operation, failure_message=failure_message, discord=discord, datetime=datetime, KST=timezone.utc, logging=logging,
                    get_user_state_lock=lambda uid: lock,
                    normalize_attendance_record=lambda r: r,
                    aget_attendance_user=AsyncMock(side_effect=lambda uid: copy.deepcopy(record)),
@@ -164,7 +183,7 @@ class CallbackTests(unittest.IsolatedAsyncioTestCase):
         exec(compile(ast.Module(body=[node], type_ignores=[]), 'main.py', 'exec'), env)
 
         def interaction(uid=42):
-            return SimpleNamespace(data={'custom_id': f'attendance:recover:42:{now}'},
+            return SimpleNamespace(extras={}, data={'custom_id': f'attendance:recover:42:{now}'},
                                    user=SimpleNamespace(id=uid), guild=object(),
                                    response=SimpleNamespace(defer=AsyncMock(), send_message=AsyncMock()),
                                    followup=SimpleNamespace(send=AsyncMock()), edit_original_response=AsyncMock())

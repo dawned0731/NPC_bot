@@ -1,3 +1,4 @@
+from runtime_safety import mark_operation, failure_message
 import ast
 import unittest
 from pathlib import Path
@@ -89,11 +90,17 @@ class ActivityCommandTests(unittest.IsolatedAsyncioTestCase):
             if missing:
                 self.assertNotIn('file', kwargs)
                 return
+            if 'file' not in kwargs:
+                self.assertEqual(fail_send, 'http')
+                self.assertIsNone(kwargs['embed'].image.url)
+                return
             image = kwargs['file']
             opened.append(image)
             self.assertFalse(image.fp.closed)
             self.assertEqual(image.fp.read(8), b'\x89PNG\r\n\x1a\n')
             self.assertEqual(kwargs['embed'].image.url, 'attachment://activity-banner.png')
+            if fail_send == 'http':
+                raise discord.Forbidden(SimpleNamespace(status=403, reason='Forbidden'), 'attachment denied')
             if fail_send:
                 raise RuntimeError('simulated network failure')
 
@@ -101,7 +108,7 @@ class ActivityCommandTests(unittest.IsolatedAsyncioTestCase):
             embed, path = build_activity(*args, **kwargs)
             return embed, path.with_name('missing-test-banner.png') if missing else path
 
-        env = dict(discord=discord, datetime=datetime, KST=timezone.utc, logging=logging,
+        env = dict(mark_operation=mark_operation, failure_message=failure_message, discord=discord, datetime=datetime, KST=timezone.utc, logging=logging,
                    aget_user_mission=AsyncMock(return_value={}),
                    aget_attendance_user=AsyncMock(return_value={}),
                    aget_user_exp=AsyncMock(return_value={'exp': 1200}),
@@ -112,16 +119,16 @@ class ActivityCommandTests(unittest.IsolatedAsyncioTestCase):
                    REPEAT_VC_REQUIRED_MINUTES=15, REPEAT_VC_EXP_REWARD=150,
                    REPEAT_VC_MIN_PEOPLE=5, ATTENDANCE_EXP_REWARD=1200, SEASON_MAX_LEVEL=100)
         exec(compile(ast.Module(body=[node], type_ignores=[]), 'main.py', 'exec'), env)
-        interaction = SimpleNamespace(user=SimpleNamespace(id=42, display_name='테스트',
+        interaction = SimpleNamespace(extras={}, user=SimpleNamespace(id=42, display_name='테스트',
                                       display_avatar=SimpleNamespace(url='https://example.com/a.png')),
                                       response=SimpleNamespace(defer=AsyncMock()),
                                       followup=SimpleNamespace(send=AsyncMock(side_effect=send)))
-        if fail_send:
+        if fail_send is True:
             with self.assertRaisesRegex(RuntimeError, 'simulated'):
                 await env['activity'](interaction)
         else:
             await env['activity'](interaction)
-        interaction.followup.send.assert_awaited_once()
+        self.assertEqual(interaction.followup.send.await_count, 2 if fail_send == 'http' else 1)
         if not missing:
             self.assertEqual(len(opened), 1)
             self.assertTrue(opened[0].fp.closed)
@@ -135,3 +142,7 @@ class ActivityCommandTests(unittest.IsolatedAsyncioTestCase):
     async def test_missing_banner_still_sends_journal(self):
         with self.assertLogs(level='WARNING'):
             await self.run_command(missing=True)
+
+    async def test_attachment_rejected_sends_embed_without_image(self):
+        with self.assertLogs(level='WARNING'):
+            await self.run_command(fail_send='http')
