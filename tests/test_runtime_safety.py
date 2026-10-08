@@ -37,7 +37,7 @@ class DailyTests(unittest.TestCase):
         source = Path('main.py').read_text(encoding='utf-8')
         self.assertNotIn('reset_daily_missions', source)
         # Season settlement remains a separate, intentional reset.
-        self.assertIn('"mission_data": None', source)
+        self.assertTrue("'mission_data': None" in Path('season_safety.py').read_text(encoding='utf-8'))
 
     def test_error_messages_distinguish_known_and_unknown_commit(self):
         i = SimpleNamespace(extras={}, command=SimpleNamespace(name='출석'), user=SimpleNamespace(id=1))

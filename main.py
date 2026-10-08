@@ -18,6 +18,7 @@ import aiohttp
 from onboarding import install as install_onboarding
 from activity_ui import build_activity, completion_embed
 from runtime_safety import daily_mission, mark_operation, failure_message
+from season_safety import MutationGate, SeasonBusy, SettlementService, ConfirmView
 from attendance_ui import recovery_offer, apply_recovery, attendance_embed, recovery_view
 
 from threading import Thread
@@ -624,6 +625,7 @@ async def abulk_update_attendance(updates: dict):
 
 # 같은 유저에게 여러 보상 루프가 동시에 접근할 때 발생하는 덮어쓰기를 막습니다.
 _USER_STATE_LOCKS: dict[str, asyncio.Lock] = {}
+SEASON_GATE = MutationGate()
 _LEVEL100_AWARD_CACHE: set[tuple[str, str]] = set()
 _SEASON_OPERATION_LOCKS: dict[int, asyncio.Lock] = {}
 
@@ -656,7 +658,7 @@ def season_operation_serialized():
                 except Exception:
                     return None
 
-            async with lock:
+            async with lock, SEASON_GATE.exclusive():
                 return await func(interaction, *args, **kwargs)
         return wrapper
     return decorator
@@ -678,20 +680,25 @@ def guard_background_task(name: str):
     return decorator
 
 
-def get_user_state_lock(uid: str | int) -> asyncio.Lock:
+def get_user_state_lock(uid: str | int):
     key = str(uid)
     lock = _USER_STATE_LOCKS.get(key)
     if lock is None:
         lock = asyncio.Lock()
         _USER_STATE_LOCKS[key] = lock
-    return lock
+    return SEASON_GATE.member(lock)
 
 
 async def aupdate_user_exp_fields(uid: str, fields: dict):
     """EXP 전체 레코드를 덮어쓰지 않고 필요한 필드만 부분 갱신합니다."""
     if not isinstance(fields, dict) or not fields:
         return
-    await asyncio.to_thread(lambda: db.reference("exp_data").child(str(uid)).update(fields))
+    async with get_user_state_lock(uid):
+        fields = dict(fields)
+        if "level" in fields:
+            current = await aget_user_exp(uid)
+            fields["level"] = calculate_level(current.get("exp", 0))
+        await asyncio.to_thread(lambda: db.reference("exp_data").child(str(uid)).update(fields))
 
 async def aget_user_exp(uid: str):
     def _get():
@@ -1781,7 +1788,9 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
         return
     original = getattr(error, "original", error)
     error_name = type(original).__name__
-    if error_name == "MissingPermissions":
+    if isinstance(original, SeasonBusy):
+        message = str(original)
+    elif error_name == "MissingPermissions":
         message = "❌ 이 명령어는 관리자만 사용할 수 있습니다."
     elif error_name == "NoPrivateMessage":
         message = "❌ 이 명령어는 서버에서만 사용할 수 있습니다."
@@ -3332,7 +3341,10 @@ async def process_season_start_if_needed(guild: discord.Guild) -> dict:
     if lock.locked():
         return {"processed": False, "reason": "season_operation_busy"}
     async with lock:
-        return await _process_season_start_if_needed_locked(guild)
+        if await settlement_service.auto_resume(guild):
+            return {"processed": False, "reason": "settlement_core_pending"}
+        async with SEASON_GATE.exclusive():
+            return await _process_season_start_if_needed_locked(guild)
 
 
 async def _process_season_start_if_needed_locked(guild: discord.Guild) -> dict:
@@ -4268,203 +4280,66 @@ async def next_season_prepare(interaction: discord.Interaction, 시즌이름: st
     )
 
 
+settlement_service = SettlementService(globals())
+
+
 @app_commands.default_permissions(administrator=True)
 @app_commands.checks.has_permissions(administrator=True)
 @app_commands.guild_only()
-@bot.tree.command(name="현재시즌초기화", description="현재 시즌을 정산하고 경험치/레벨을 초기화합니다.")
-@season_operation_serialized()
+@bot.tree.command(name="현재시즌초기화", description="시즌 정산 결과를 미리 보고 확인 후 초기화합니다.")
 async def current_season_reset(interaction: discord.Interaction):
-    if not interaction.guild:
-        return await interaction.response.send_message("DM에서는 사용할 수 없습니다.", ephemeral=True)
+    await settlement_service.preview(interaction)
 
+
+@app_commands.default_permissions(administrator=True)
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.guild_only()
+@bot.tree.command(name="정산재개", description="초기화 없이 실패한 정산 후처리만 다시 실행합니다.")
+@season_operation_serialized()
+async def settlement_resume(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
-    state = await aget_effective_season_state()
+    await interaction.followup.send(await settlement_service.resume(interaction.guild), ephemeral=True)
 
-    if not state.get("first_season_started"):
-        return await interaction.followup.send(
-            "❌ 첫 시즌 시작 전에는 정산할 시즌이 없습니다.",
-            ephemeral=True,
-        )
-    if state.get("status") == SEASON_STATUS_REGULAR:
-        return await interaction.followup.send(
-            "❌ 정규 시즌 중에는 초기화할 수 없습니다. 프리시즌 또는 시즌 잠금 상태에서 진행해주세요.",
-            ephemeral=True,
-        )
-    if state.get("settled"):
-        return await interaction.followup.send(
-            "❌ 현재 시즌은 이미 정산 완료 상태입니다.",
-            ephemeral=True,
-        )
 
-    season_id = state.get("current_season_id")
-    reward = await _get_season_reward(season_id)
-    if not reward.get("title_name"):
-        return await interaction.followup.send(
-            "❌ 현재 시즌 Lv.100 보상 칭호가 설정되어 있지 않습니다.",
-            ephemeral=True,
-        )
-
-    cache_ok, cache_error = await ensure_guild_member_cache_complete(interaction.guild)
-    if not cache_ok:
-        return await interaction.followup.send(
-            "❌ 시즌 정산을 중단했습니다. 서버원 목록이 완전히 로드되지 않았습니다.\n"
-            f"사유: {cache_error}",
-            ephemeral=True,
-        )
-
-    exp_data = await aload_exp_data()
-    if not isinstance(exp_data, dict):
-        exp_data = {}
-
-    now_iso = datetime.now(KST).isoformat()
-    reached: list[str] = []
-    dm_success: list[str] = []
-    dm_failed: list[str] = []
-    reset_count = 0
-    records: dict[str, dict] = {}
-    reset_exp_data = copy.deepcopy(exp_data)
-
-    for uid, raw in list(exp_data.items()):
-        uid = str(uid)
-        if not isinstance(raw, dict):
-            continue
-        exp = max(0, _safe_int(raw.get("exp", 0), 0))
-        level = calculate_level(exp)
-        reached_100 = level >= SEASON_MAX_LEVEL
-
-        if reached_100:
-            reached.append(uid)
-            member = None
-            try:
-                member = interaction.guild.get_member(int(uid)) or await interaction.guild.fetch_member(int(uid))
-            except Exception:
-                pass
-            if member and not member.bot:
-                await maybe_award_level100(member, level, reason="season_settlement")
-                completion = await asyncio.to_thread(
-                    lambda sid=season_id, x=uid: _season_completion_ref(sid, x).get() or {}
-                )
-                (dm_success if completion.get("dm_sent") else dm_failed).append(uid)
-            else:
-                dm_failed.append(uid)
-
-        records[uid] = {
-            "final_exp": exp,
-            "final_level": level,
-            "reached_100": reached_100,
-            "reward_title": reward.get("title_name", ""),
-            "settled_at": now_iso,
-        }
-
-        reset_record = copy.deepcopy(raw)
-        reset_record["exp"] = 0
-        reset_record["level"] = 1
-        reset_record["voice_minutes"] = 0
-        reset_record["last_text_xp_at"] = 0
-        reset_exp_data[uid] = reset_record
-        reset_count += 1
-
-    settlement_updates = {
-        f"season_records/{season_id}": records,
-        "exp_data": reset_exp_data if reset_exp_data else None,
-        "mission_data": None,
-        "season_state/settled": True,
-        "season_state/status": SEASON_STATUS_PRESEASON,
-        "season_state/next_ready": False,
-        "season_state/settled_by": str(interaction.user.id),
-        "season_state/settled_at": now_iso,
-        "season_state/settlement_postprocess_pending": True,
-        "season_state/settlement_postprocess_season_id": season_id,
-        "season_state/settlement_notice_sent_for": "",
-        "season_state/settlement_notice_pending": True,
-        "season_state/settlement_log_sent_for": "",
-    }
+@app_commands.default_permissions(administrator=True)
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.guild_only()
+@bot.tree.command(name="정산백업", description="직전 정산의 복구용 백업을 내려받습니다.")
+async def settlement_backup(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    backup = await settlement_service.get("season_backup")
+    if not backup or backup.get("guild_id") != str(interaction.guild.id):
+        return await interaction.followup.send("보관된 백업이 없습니다.", ephemeral=True)
+    file = discord.File(BytesIO(json.dumps(backup, ensure_ascii=False, indent=2).encode("utf-8")), filename="season-backup.json")
     try:
-        await afirebase_root_update_strict(settlement_updates)
-    except Exception as e:
-        logging.exception(f"[season-settlement] atomic update failed: {e}")
-        committed = False
-        try:
-            verify_state = await asyncio.to_thread(lambda: _season_state_ref().get() or {})
-            verify_records = await asyncio.to_thread(lambda: _season_records_ref(season_id).get() or {})
-            committed = (
-                isinstance(verify_state, dict)
-                and verify_state.get("settled") is True
-                and isinstance(verify_records, dict)
-            )
-        except Exception:
-            committed = False
+        await interaction.followup.send("직전 초기화 전 데이터입니다. 복원은 자동 실행하지 않습니다.", file=file, ephemeral=True)
+    finally:
+        file.close()
 
-        if not committed:
-            return await interaction.followup.send(
-                "❌ 시즌 정산 저장에 실패했습니다. 경험치와 시즌 상태는 변경되지 않았습니다.",
-                ephemeral=True,
-            )
-        logging.warning("[season-settlement] update response failed, but committed state was verified")
 
-    try:
-        save_json(MISSION_PATH, {})
-    except Exception as e:
-        logging.warning(f"[season-settlement] local mission cache reset failed: {e!r}")
-
-    nick_result = await reset_progress_title_members(interaction.guild, level=1)
-    names = []
-    for uid in reached[:20]:
-        try:
-            member = interaction.guild.get_member(int(uid)) or await interaction.guild.fetch_member(int(uid))
-            names.append(member.display_name)
-        except Exception:
-            names.append(uid)
-    reached_text = "없음" if not names else "\n".join(f"- {name}" for name in names)
-    if len(reached) > 20:
-        reached_text += f"\n...외 {len(reached) - 20}명"
-
-    embed = discord.Embed(title="🧾 현재 시즌 정산 완료", color=discord.Color.blurple())
-    embed.add_field(name="시즌", value=f"{state.get('current_season_name')} (`{season_id}`)", inline=False)
-    embed.add_field(name="초기화", value=f"경험치/레벨/음성시간 초기화: {reset_count}명", inline=False)
-    embed.add_field(name="Lv.100 대상자", value=f"총 {len(reached)}명\n{reached_text}", inline=False)
-    embed.add_field(
-        name="보상 DM 기록",
-        value=f"성공 기록: {len(dm_success)}명 / 실패 또는 확인 불가: {len(dm_failed)}명",
-        inline=False,
-    )
-    embed.add_field(
-        name="닉네임 갱신",
-        value=f"성공: {nick_result['updated']}명 / 실패: {nick_result['failed']}명",
-        inline=False,
-    )
-    embed.set_footer(text=f"정산자: {interaction.user.display_name} · {datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')}")
-
-    log_sent = False
-    log_channel = interaction.guild.get_channel(LOG_CHANNEL_ID)
-    if log_channel and hasattr(log_channel, "send"):
-        try:
-            await log_channel.send(embed=embed, allowed_mentions=ALLOW_NO_PING)
-            log_sent = True
-        except Exception:
-            pass
-
-    notice_sent = False
-    notice = interaction.guild.get_channel(SEASON_NOTICE_CHANNEL_ID)
-    if notice and hasattr(notice, "send"):
-        try:
-            await notice.send(
-                f"📢 `{state.get('current_season_name')}` 시즌 정산이 완료되었습니다. 프리시즌 동안 시즌 경험치 획득이 중단됩니다.",
-                allowed_mentions=ALLOW_NO_PING,
-            )
-            notice_sent = True
-        except Exception:
-            pass
-
-    await _update_season_state({
-        "settlement_postprocess_pending": False,
-        "settlement_postprocess_completed_at": datetime.now(KST).isoformat(),
-        "settlement_notice_sent_for": season_id if notice_sent else "",
-        "settlement_notice_pending": not notice_sent,
-        "settlement_log_sent_for": season_id if log_sent else "",
-    })
-
-    await interaction.followup.send(embed=embed, ephemeral=True)
+@app_commands.default_permissions(administrator=True)
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.guild_only()
+@bot.tree.command(name="정산백업정리", description="정산 완료를 확인한 뒤 직전 백업을 삭제합니다.")
+async def settlement_backup_cleanup(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    backup = await settlement_service.get("season_backup") or {}
+    if backup.get("guild_id") != str(interaction.guild.id):
+        return await interaction.followup.send("보관된 백업이 없습니다.", ephemeral=True)
+    token = backup.get("token")
+    async def confirm(i):
+        lock = get_season_operation_lock(i.guild.id)
+        if lock.locked():
+            raise SeasonBusy()
+        async with lock, SEASON_GATE.exclusive():
+            current = await settlement_service.get("season_backup") or {}
+            job = await settlement_service.get("season_settlement") or {}
+            if current.get("token") != token or job.get("token") != token or job.get("status") != "complete":
+                raise ValueError("백업이 변경됐거나 정산 후처리가 남아 있습니다. `/정산재개`로 확인해주세요.")
+            await settlement_service.update({"season_backup": None})
+        await i.followup.send("직전 정산 백업을 삭제했습니다.", ephemeral=True)
+    await interaction.followup.send("정산 결과를 확인했다면 백업을 삭제할 수 있습니다. 복구용 파일이 필요하면 먼저 `/정산백업`으로 내려받아주세요.",
+                                    view=ConfirmView(interaction.user.id, confirm, '확인 후 백업 삭제'), ephemeral=True)
 
 
 class TitleSelect(discord.ui.Select):
