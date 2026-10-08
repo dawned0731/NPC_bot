@@ -825,7 +825,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.bot.get_channel.return_value = thread
         await Onboarding.render(self.service, self.member, state)
         message = await thread.fetch_message(state['message_id'])
-        self.assertIn('/퀘스트', message.edit.await_args.kwargs['embed'].description)
+        self.assertIn('/활동', message.edit.await_args.kwargs['embed'].description)
 
     async def test_welcome_settings_persists_selected_channel(self):
         channel = MagicMock(spec=discord.TextChannel)

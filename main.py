@@ -16,6 +16,7 @@ import functools
 import pytz
 import aiohttp
 from onboarding import install as install_onboarding
+from activity_ui import build_activity, completion_embed
 from attendance_ui import recovery_offer, apply_recovery, attendance_embed, recovery_view
 
 from threading import Thread
@@ -527,9 +528,9 @@ VOICE_COOLDOWN = 60
 VOICE_MIN_XP = 10
 VOICE_MAX_XP = 50
 AFK_CHANNEL_IDS = [1386685633820495994]
-MISSION_EXP_REWARD = 100
+MISSION_EXP_REWARD = 300
 MISSION_REQUIRED_MESSAGES = 30
-REPEAT_VC_EXP_REWARD = 100
+REPEAT_VC_EXP_REWARD = 150
 REPEAT_VC_REQUIRED_MINUTES = 15
 REPEAT_VC_MIN_PEOPLE = 5
 SPECIAL_VC_CATEGORY_IDS = [1386685633820495991]
@@ -2252,7 +2253,7 @@ async def on_message(message):
             if not bool(user_m["text"].get("completed")):
                 user_m["text"]["count"] = max(0, _safe_int(user_m["text"].get("count", 0), 0)) + 1
                 if user_m["text"]["count"] >= MISSION_REQUIRED_MESSAGES:
-                    reward_xp = max(10, min(int(round(SEASON_XP_PER_LEVEL * 0.01)), 5000))
+                    reward_xp = MISSION_EXP_REWARD
                     user_data["exp"] += reward_xp
                     user_m["text"]["completed"] = True
                     quest_completed_now = True
@@ -2286,33 +2287,21 @@ async def on_message(message):
             if log_ch:
                 await log_ch.send(
                     f"[🧾 로그] {message.author.display_name} 님 텍스트 일일 퀘스트 완료! "
-                    f"+{reward_xp}XP (1%)",
+                    f"+{reward_xp} XP",
                     allowed_mentions=ALLOW_NO_PING,
                 )
-            try:
-                buf = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        render_daily_quest_banner,
-                        display_name=message.author.display_name,
-                        pct_int=pct_int,
-                        height=40,
-                        reward_pct=1,
-                    ),
-                    timeout=6,
-                )
-                await message.channel.send(file=discord.File(fp=buf, filename="daily_quest.png"))
-            except Exception:
-                await message.channel.send(
-                    f"🎯 {message.author.mention} 일일 퀘스트 완료! "
-                    f"경험치 1% 지급 (현재 {pct_int}%)"
-                )
+            state = await aget_effective_season_state()
+            await message.channel.send(
+                embed=completion_embed(strip_title_suffix(message.author.display_name), reward_xp, state),
+                allowed_mentions=ALLOW_NO_PING,
+            )
 
         if final_level >= SEASON_MAX_LEVEL:
             await maybe_award_level100(message.author, final_level, reason="text_activity")
     except Exception as e:
         logging.exception(f"[on_message] processing error: {e}")
 
-# ---- 기타 슬래시 커맨드 핸들러 (/정보, /퀘스트, /랭킹, /출석, /출석랭킹) ----
+# ---- 기타 슬래시 커맨드 핸들러 (/정보, /활동, /랭킹, /출석, /출석랭킹) ----
 
 # 건의함 기능 설정
 SUGGEST_ANON_CHANNEL_ID = 1410186330083954689  # 익명 건의함 채널 ID
@@ -2705,7 +2694,7 @@ async def deduct_xp(interaction: discord.Interaction, member: discord.Member, am
         f"✅ {member.mention}에게서 경험치 {amount}XP 차감 완료!",
         ephemeral=True,
     )
-# ---- 기타 슬래시 커맨드 핸들러 (/정보, /퀘스트, /랭킹, /출석, /출석랭킹) ----
+# ---- 기타 슬래시 커맨드 핸들러 (/정보, /활동, /랭킹, /출석, /출석랭킹) ----
                                             
 @app_commands.guild_only()
 @bot.tree.command(name="정보", description="내 정보를 이미지 카드로 확인합니다")
@@ -2789,8 +2778,8 @@ async def info(interaction: discord.Interaction):
 
 
 @app_commands.guild_only()
-@bot.tree.command(name="퀘스트", description="일일 및 반복 VC 퀘스트 현황을 확인합니다.")
-async def quest(interaction: discord.Interaction):
+@bot.tree.command(name="활동", description="오늘의 출석·대화·음성 활동 일지를 확인합니다.")
+async def activity(interaction: discord.Interaction):
     await interaction.response.defer()
     uid = str(interaction.user.id)
     today = datetime.now(KST).strftime("%Y-%m-%d")
@@ -2806,26 +2795,26 @@ async def quest(interaction: discord.Interaction):
     if not isinstance(um.get("repeat_vc"), dict):
         um["repeat_vc"] = {"minutes": 0}
 
-    text_count = max(0, _safe_int(um["text"].get("count", 0), 0))
-    text_status = (
-        f"진행도: {text_count} / {MISSION_REQUIRED_MESSAGES}\n"
-        f"상태: {'✅ 완료' if bool(um['text'].get('completed')) else '❌ 미완료'}"
-    )
-    vc_minutes = max(0, _safe_int(um["repeat_vc"].get("minutes", 0), 0))
-    vc_status = (
-        f"누적 참여: {vc_minutes}분\n"
-        f"보상 횟수: {vc_minutes // REPEAT_VC_REQUIRED_MINUTES}회 지급"
-    )
-
     attendance = await aget_attendance_user(uid)
-    attended = isinstance(attendance, dict) and attendance.get("last_date") == today
-    attendance_status = f"상태: {'✅ 출석 완료' if attended else '❌ 출석 안됨'}"
+    xp = await aget_user_exp(uid)
+    state = await aget_effective_season_state()
+    embed, banner = build_activity(
+        interaction.user, strip_title_suffix(interaction.user.display_name), um,
+        attendance if isinstance(attendance, dict) else {}, today,
+        xp.get("exp", 0), state, get_level_progress,
+        text_goal=MISSION_REQUIRED_MESSAGES, text_reward=MISSION_EXP_REWARD,
+        voice_goal=REPEAT_VC_REQUIRED_MINUTES, voice_reward=REPEAT_VC_EXP_REWARD,
+        voice_people=REPEAT_VC_MIN_PEOPLE, attendance_reward=ATTENDANCE_EXP_REWARD,
+        max_level=SEASON_MAX_LEVEL,
+    )
+    if banner.is_file():
+        embed.set_image(url="attachment://activity-banner.png")
+        with discord.File(banner, filename="activity-banner.png") as image:
+            await interaction.followup.send(embed=embed, file=image)
+    else:
+        logging.warning("Activity banner missing: %s", banner)
+        await interaction.followup.send(embed=embed)
 
-    embed = discord.Embed(title="📜 퀘스트 현황", color=discord.Color.green())
-    embed.add_field(name="🗨️ 텍스트 미션", value=text_status, inline=False)
-    embed.add_field(name="📞 5인 이상 통화방 참여 미션", value=vc_status, inline=False)
-    embed.add_field(name="🗓️ 출석", value=attendance_status, inline=False)
-    await interaction.followup.send(embed=embed)
 
 @app_commands.guild_only()
 @bot.tree.command(name="랭킹", description="경험치 랭킹을 확인합니다.")
