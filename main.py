@@ -2008,6 +2008,17 @@ async def touch_member_activity(uid):
         _ACTIVITY_TOUCH_TS[uid] = now
 
 
+@bot.listen("on_voice_state_update")
+async def record_voice_activity(member, before, after):
+    """Brief voice visits count as activity even between periodic XP ticks."""
+    if member.bot or before.channel == after.channel:
+        return
+    try:
+        await touch_member_activity(str(member.id))
+    except Exception:
+        logging.exception("[activity] voice activity save failed uid=%s", member.id)
+
+
 @tasks.loop(seconds=VOICE_COOLDOWN)
 @guard_background_task("voice_xp")
 async def voice_xp_task():
@@ -4674,6 +4685,8 @@ async def readiness(_request):
         {
             "ready": ready,
             "commit": os.getenv("RENDER_GIT_COMMIT", "local"),
+            "commands_synced": bool(getattr(bot, "_synced", False)),
+            "season_tasks_running": season_transition_task.is_running() and season_boundary_task.is_running(),
             "discord_user": str(bot.user) if bot.user else None,
             "guild_count": len(bot.guilds),
         },

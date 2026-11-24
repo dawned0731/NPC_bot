@@ -41,12 +41,13 @@
   "notice_images_connected": true,
   "deployment_blocked": false,
   "blockers": [],
-  "tests_passed": 166,
+  "tests_passed": 167,
   "preseason_archive_required": false,
   "cutoff_policy": "KST 23:00 lock and clear; 00:00 open prepared regular season",
   "ranking_cache_seconds": 30,
   "regular_start_notice_images_connected": true,
   "xp_storage": "per-user epoch CAS, XP and missions atomic; root CAS only for migration/attendance/settlement/boundary/title awards",
   "production_database_tested": false,
-  "deployment_status": "validated; awaiting merge and deployment verification"
+  "deployment_status": "validated; GitHub main merge authorized; live status verified separately",
+  "brief_voice_activity_recorded": true
 }

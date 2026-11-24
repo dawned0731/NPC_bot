@@ -214,3 +214,10 @@ class MainIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result['processed'], result)
         self.assertEqual(self.db.root['exp_data']['42']['exp'], 0)
         self.assertEqual(self.db.root['season_state']['current_season_id'], '2026_winter')
+
+    async def test_brief_voice_visit_records_activity_during_maintenance(self):
+        Clock.value = datetime(2026, 11, 30, 23, 30, tzinfo=KST)
+        member = SimpleNamespace(id=99, bot=False)
+        await self.main.record_voice_activity(member, SimpleNamespace(channel=None), SimpleNamespace(channel=object()))
+        self.assertGreater(self.db.root['exp_data']['99']['last_activity'], 0)
+        self.assertEqual(self.db.root['exp_data']['99'].get('exp', 0), 0)
