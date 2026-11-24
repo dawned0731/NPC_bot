@@ -1,5 +1,7 @@
 from activity_guard import inactive_candidate
 import season_policy
+from season_runtime import close_if_due, open_regular
+from season_transition import closing_due
 from ranking_cache import RankingCache
 _RANKING_CACHE = RankingCache()
 import discord
@@ -1362,7 +1364,6 @@ async def aget_effective_season_state() -> dict:
         elif effective.get("current_season_id") != cal["season_id"]:
             desired = {
                 "status": SEASON_STATUS_LOCKED,
-                "next_season_id": cal["season_id"],
             }
         else:
             desired = {
@@ -1371,6 +1372,11 @@ async def aget_effective_season_state() -> dict:
                 "current_season_label": cal["season_label"],
                 "next_season_id": cal["next_season_id"],
             }
+
+        if effective.get("first_season_started"):
+            stored_year, stored_kind = effective["current_season_id"].split("_", 1)
+            if closing_due(_season_dates_for_type(int(stored_year), stored_kind), datetime.now(KST)):
+                desired["status"] = SEASON_STATUS_LOCKED
 
         for key, value in desired.items():
             if effective.get(key) != value:
@@ -1840,7 +1846,7 @@ async def on_ready():
             print(f"❌ 슬래시 커맨드 동기화 실패: {e!r}")
 
     # 4) 백그라운드 태스크 안전 시작(중복 방지)
-    for task in (voice_xp_task, repeat_vc_mission_task, inactive_user_log_task, voice_count_channel_task, season_transition_task):
+    for task in (voice_xp_task, repeat_vc_mission_task, inactive_user_log_task, voice_count_channel_task, season_transition_task, season_boundary_task):
         try:
             if not task.is_running():
                 task.start()
@@ -2188,7 +2194,7 @@ async def voice_count_channel_task():
         except Exception as e:
             logging.exception(f"[voice-count] guild={guild.id} error: {e}")
 
-@tasks.loop(minutes=5)
+@tasks.loop(seconds=30)
 @guard_background_task("season_transition")
 async def season_transition_task():
     """
@@ -2201,6 +2207,12 @@ async def season_transition_task():
             await process_season_start_if_needed(guild)
     except Exception as e:
         logging.exception(f"[season_transition_task] error: {e}")
+
+@tasks.loop(time=[dtime(hour=23, tzinfo=KST), dtime(hour=0, tzinfo=KST)])
+@guard_background_task("season_boundary")
+async def season_boundary_task():
+    for guild in bot.guilds:
+        await process_season_start_if_needed(guild)
 
 @bot.event
 async def on_message(message):
@@ -3382,6 +3394,7 @@ async def process_season_start_if_needed(guild: discord.Guild) -> dict:
         if await settlement_service.auto_resume(guild):
             return {"processed": False, "reason": "settlement_core_pending"}
         async with SEASON_GATE.exclusive():
+            await close_if_due(globals())
             return await _process_season_start_if_needed_locked(guild)
 
 
@@ -3657,22 +3670,8 @@ async def _process_season_start_if_needed_locked(guild: discord.Guild) -> dict:
 
     season_name = state.get("next_season_name") or DEFAULT_SEASON_NAMES.get(cal["season_type"], "새 시즌")
     now_iso = datetime.now(KST).isoformat()
-    await _update_season_state({
-        "current_season_id": calendar_id,
-        "current_season_name": season_name,
-        "current_season_type": cal["season_type"],
-        "current_season_label": cal["season_label"],
-        "status": cal["status"],
-        "settled": False,
-        "next_ready": False,
-        "next_season_id": cal["next_season_id"],
-        "next_season_name": "",
-        "started_at": now_iso,
-        "season_start_processed_at": now_iso,
-        "season_start_postprocess_pending_for": calendar_id,
-        "season_start_notice_pending_for": calendar_id,
-        "season_start_notice_last_error": "",
-    })
+    await open_regular(globals(), state, cal)
+
 
     nick_result = await reset_progress_title_members(guild, level=1)
     await _update_season_state({
