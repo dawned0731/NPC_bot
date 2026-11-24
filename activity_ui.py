@@ -22,7 +22,7 @@ def build_activity(member, name, mission, attendance, today, xp, state, progress
                    text_goal=30, text_reward=300, voice_goal=15, voice_reward=150,
                    voice_people=5, attendance_reward=1200, max_level=100):
     season = season_key(state)
-    active = state.get('status') == 'regular'
+    active = state.get('status') == 'regular' or (state.get('status') == 'preseason' and state.get('settled'))
     embed = discord.Embed(title='사계절, 그 사이 · 오늘의 활동',
                           description=f'{discord.utils.escape_markdown(name)} 님의 활동 일지',
                           color=COLORS[season])

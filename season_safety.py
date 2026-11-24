@@ -8,6 +8,8 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import discord
 from runtime_safety import failure_message, mark_operation
+from season_storage import apply_patch
+from season_transition import epoch
 
 
 class SeasonBusy(RuntimeError):
@@ -75,6 +77,8 @@ def settlement_payload(state, reward, data, missions, guild_id, actor_id, level)
         records[uid] = {'final_exp': xp, 'final_level': final_level, 'reached_100': final_level >= 100,
                         'reward_title': reward['title_name'], 'settled_at': stamp}
         reset[uid].update(exp=0, level=1, voice_minutes=0, last_text_xp_at=0)
+        reset[uid].pop('_mission', None)
+        reset[uid]['_xp_epoch'] = epoch(dict(state, settled=True))
     job = {'token': token, 'season_id': sid, 'guild_id': str(guild_id), 'season_name': state.get('current_season_name', sid),
            'reward': reward, 'created_at': stamp, 'status': 'pending', 'steps': {}, 'core_done': False}
     return {
@@ -168,7 +172,7 @@ class SettlementService:
         reward = await self.g['_get_season_reward'](state['current_season_id'])
         data = await self.g['aload_exp_data']()
         if state.get('settled') or state.get('status') == 'regular' or signature != fingerprint(state, reward, data):
-            raise ValueError('미리보기 이후 시즌/경험치/보상 설정이 바뀌었습니다. `/현재시즌초기화`를 다시 실행해주세요.')
+            raise ValueError('미리보기 이후 시즌/경험치/보상 설정이 바뀌었습니다. `/시즌관리 → 현재 시즌 정산`를 다시 실행해주세요.')
         ok, error = await self.g['ensure_guild_member_cache_complete'](interaction.guild)
         if not ok:
             raise ValueError(f'서버원 목록을 확인하지 못했습니다: {error}')
@@ -177,7 +181,25 @@ class SettlementService:
         token = values['season_settlement']['token']
         mark_operation(interaction, '정산과 백업 저장', 'saving')
         try:
-            await self.update(values)
+            if 'db' in self.g:
+                def commit_root(root):
+                    current = (root or {}).get('season_state') or {}
+                    if current.get('settlement_token') == token:
+                        return root
+                    actual_reward = ((root or {}).get('season_rewards') or {}).get(state['current_season_id']) or {}
+                    if current.get('settled') or signature != fingerprint(current, actual_reward, (root or {}).get('exp_data') or {}):
+                        raise ValueError('정산 확인 후 데이터가 변경되었습니다. 다시 미리보기를 실행해주세요.')
+                    payload = copy.deepcopy(values)
+                    # Activity is deliberately excluded from the preview hash.
+                    # Preserve newer observations if a root transaction retries.
+                    for uid, record in (payload.get('exp_data') or {}).items():
+                        latest = ((root or {}).get('exp_data') or {}).get(uid) or {}
+                        record['last_activity'] = max(float(record.get('last_activity') or 0), float(latest.get('last_activity') or 0))
+                    payload['season_backup']['exp_data'] = copy.deepcopy((root or {}).get('exp_data') or {})
+                    return apply_patch(root, payload)
+                await asyncio.to_thread(lambda: self.g['db'].reference().transaction(commit_root))
+            else:
+                await self.update(values)
         except Exception:
             # Never claim rollback just because the acknowledgement was lost.
             saved = await self.get('season_state') or {}
@@ -247,10 +269,15 @@ class SettlementService:
                     raise RuntimeError('nickname update failed')
             await step(f'nick_{member.id}', nickname)
         async def notice():
+            if any(key.startswith(('award_', 'nick_')) for key in errors):
+                raise RuntimeError('보상·닉네임 후처리를 완료한 뒤 정산 공지를 보냅니다.')
             channel = guild.get_channel(int(state.get('season_notice_channel_id') or self.g['SEASON_NOTICE_CHANNEL_ID']))
             if channel is None:
                 raise ValueError('시즌 공지 채널 없음')
-            await channel.send(f"📢 `{job['season_name']}` 시즌 정산이 완료되었습니다. 프리시즌 동안 시즌 경험치 획득이 중단됩니다.", allowed_mentions=discord.AllowedMentions.none())
+            if 'send_settlement_notice' in self.g:
+                await self.g['send_settlement_notice'](channel, state, job)
+            else:
+                await channel.send(f"📢 `{job['season_name']}` 시즌 정산이 완료되었습니다.", allowed_mentions=discord.AllowedMentions.none())
         await step('notice', notice)
         async def log():
             cfg = await self.g['aget_guild_config'](guild.id)
@@ -266,6 +293,8 @@ class SettlementService:
         return f'후처리 미완료 {len(errors)}개입니다.' if errors else '칭호·닉네임·DM·공지 후처리를 완료했습니다.'
 
     async def auto_resume(self, guild):
+        if await self.get('season_settlement/status') != 'pending':
+            return False
         job = await self.get('season_settlement') or {}
         if job.get('guild_id') != str(guild.id) or job.get('status') != 'pending':
             return False
