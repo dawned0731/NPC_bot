@@ -157,7 +157,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.mission['repeat_vc']['minutes'], 15)
 
     async def test_touch_is_partial_throttled_and_failed_write_retries(self):
-        env = functions(dict(self.env, _ACTIVITY_TOUCH_TS={}), 'touch_member_activity')
+        env = functions(dict(self.env, _ACTIVITY_TOUCH_TS={}, _ACTIVITY_OBSERVED_TS={}), 'touch_member_activity')
         env['afirebase_root_update_strict'] = AsyncMock(side_effect=[RuntimeError('database'), None, None])
         with self.assertRaises(RuntimeError):
             await env['touch_member_activity']('42')

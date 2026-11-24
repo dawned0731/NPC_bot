@@ -1,3 +1,4 @@
+from activity_guard import inactive_candidate
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
@@ -1949,6 +1950,15 @@ async def inactive_user_log_task():
                 except Exception:
                     await log_channel.send(f"❌ {member.display_name} 님에게 DM 전송 실패")
 
+                # Re-read after the DM await: activity may have arrived meanwhile.
+                latest = await aget_user_exp(str(member.id))
+                if not inactive_candidate(
+                    latest.get("last_activity"), threshold.timestamp(),
+                    recent_activity=_ACTIVITY_OBSERVED_TS.get(str(member.id), 0),
+                    joined_at=member.joined_at.timestamp() if member.joined_at else 0,
+                    in_voice=bool(member.voice and member.voice.channel),
+                ):
+                    continue
                 await member.kick(reason=f"{INACTIVE_KICK_DAYS}일 미접속 자동 추방")
                 await log_channel.send(
                     f"👢 {member.display_name} 님이 {INACTIVE_KICK_DAYS}일간 미접속으로 추방되었습니다."
@@ -1968,10 +1978,13 @@ async def inactive_user_log_task():
         
 # Daily records are replaced per member under their lock, never deleted at midnight.
 _ACTIVITY_TOUCH_TS = {}
+_ACTIVITY_OBSERVED_TS = {}
 
 
 async def touch_member_activity(uid):
     """Persist one activity timestamp; no XP or history, at most once/minute here."""
+    uid = str(uid)
+    _ACTIVITY_OBSERVED_TS[uid] = time.time()
     async with get_user_state_lock(uid):
         now = time.time()
         if 0 <= now - _ACTIVITY_TOUCH_TS.get(uid, 0) < 60:
@@ -2179,6 +2192,11 @@ async def season_transition_task():
 
 @bot.event
 async def on_message(message):
+    if message.guild and not message.author.bot:
+        try:
+            await touch_member_activity(str(message.author.id))
+        except Exception:
+            logging.exception("[activity] message timestamp persistence failed")
     try:
         if _is_bot_message(message) or _is_low_value_context(message):
             return
@@ -2218,7 +2236,6 @@ async def on_message(message):
                     logging.exception(f"[role] add_roles error: {e}")
 
         if not await aseason_xp_enabled():
-            await touch_member_activity(str(message.author.id))
             return
 
         uid = str(message.author.id)
