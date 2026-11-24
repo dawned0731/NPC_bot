@@ -13,6 +13,9 @@ from runtime_safety import daily_mission, mark_operation, failure_message
 
 
 def functions(env, *names):
+    import season_policy
+    season_policy.bind({"first_season_started":True,"status":"regular"})
+    env["season_policy"]=season_policy
     tree = ast.parse(Path('main.py').read_text(encoding='utf-8'))
     nodes = [n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name in names]
     for node in nodes:

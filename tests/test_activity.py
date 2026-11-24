@@ -118,6 +118,9 @@ class ActivityCommandTests(unittest.IsolatedAsyncioTestCase):
                    MISSION_REQUIRED_MESSAGES=30, MISSION_EXP_REWARD=300,
                    REPEAT_VC_REQUIRED_MINUTES=15, REPEAT_VC_EXP_REWARD=150,
                    REPEAT_VC_MIN_PEOPLE=5, ATTENDANCE_EXP_REWARD=1200, SEASON_MAX_LEVEL=100)
+        import season_policy
+        season_policy.bind({'first_season_started': True, 'status': 'regular'})
+        env['season_policy'] = season_policy
         exec(compile(ast.Module(body=[node], type_ignores=[]), 'main.py', 'exec'), env)
         interaction = SimpleNamespace(extras={}, user=SimpleNamespace(id=42, display_name='테스트',
                                       display_avatar=SimpleNamespace(url='https://example.com/a.png')),

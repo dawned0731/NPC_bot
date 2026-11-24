@@ -106,6 +106,9 @@ class CallbackTests(unittest.IsolatedAsyncioTestCase):
                    afirebase_root_update_strict=save, ATTENDANCE_DB_KEY='attendance_data',
                    aget_guild_config=AsyncMock(return_value={}), get_channel_from_cfg=AsyncMock(return_value=None),
                    LEVELUP_ANNOUNCE_CHANNEL=0, update_role_and_nick=AsyncMock())
+        import season_policy
+        season_policy.bind({'first_season_started': True, 'status': 'regular'})
+        env['season_policy'] = season_policy
         exec(compile(ast.Module(body=[node], type_ignores=[]), 'main.py', 'exec'), env)
         interaction = SimpleNamespace(extras={}, user=SimpleNamespace(id=42, display_name='테스트',
                                       display_avatar=SimpleNamespace(url='https://example.com/a.png')),
@@ -180,6 +183,9 @@ class CallbackTests(unittest.IsolatedAsyncioTestCase):
                    afirebase_root_update_strict=save, ATTENDANCE_DB_KEY='attendance_data',
                    update_role_and_nick=AsyncMock(), attendance_embed=lambda *a: discord.Embed(),
                    get_level_progress=None, SEASON_MAX_LEVEL=100)
+        import season_policy
+        season_policy.bind({'first_season_started': True, 'status': 'regular'})
+        env['season_policy'] = season_policy
         exec(compile(ast.Module(body=[node], type_ignores=[]), 'main.py', 'exec'), env)
 
         def interaction(uid=42):

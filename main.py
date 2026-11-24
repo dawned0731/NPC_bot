@@ -1,4 +1,5 @@
 from activity_guard import inactive_candidate
+import season_policy
 from ranking_cache import RankingCache
 _RANKING_CACHE = RankingCache()
 import discord
@@ -964,7 +965,7 @@ def calculate_level(exp: int) -> int:
 
     exp = max(0, exp)
     level = (exp // SEASON_XP_PER_LEVEL) + 1
-    return max(1, min(int(level), SEASON_MAX_LEVEL))
+    return max(1, int(level)) if season_policy.is_preseason() else max(1, min(int(level), SEASON_MAX_LEVEL))
 
 
 def get_level_progress(exp: int) -> tuple[int, int, int, float]:
@@ -984,7 +985,7 @@ def get_level_progress(exp: int) -> tuple[int, int, int, float]:
     exp = max(0, exp)
     level = calculate_level(exp)
 
-    if level >= SEASON_MAX_LEVEL:
+    if level >= SEASON_MAX_LEVEL and not season_policy.is_preseason():
         return SEASON_MAX_LEVEL, SEASON_XP_PER_LEVEL, SEASON_XP_PER_LEVEL, 1.0
 
     current_level_start = (level - 1) * SEASON_XP_PER_LEVEL
@@ -1382,12 +1383,12 @@ async def aget_effective_season_state() -> dict:
         effective["calendar"] = cal
         return effective
 
-    return await asyncio.to_thread(_get_and_fix)
+    return season_policy.bind(await asyncio.to_thread(_get_and_fix))
 
 
 async def aseason_xp_enabled() -> bool:
     state = await aget_effective_season_state()
-    return state.get("status") == SEASON_STATUS_REGULAR
+    return season_policy.multiplier(state) > 0
 
 
 def season_status_label(status: str) -> str:
@@ -1429,7 +1430,9 @@ def progress_title_text(level: int, state: dict) -> str:
         return "??? : 시즌 준비 중"
     if state.get("status") == SEASON_STATUS_REGULAR:
         return f"Lv. {int(level)} : {state.get('current_season_name', CURRENT_SEASON_NAME)}"
-    return "??? : 프리시즌"
+    if season_policy.is_preseason(state):
+        return f"Lv.{int(level)} : 프리시즌"
+    return "??? : 시즌 정비 중"
 
 
 async def aget_user_titles(uid: str) -> dict:
@@ -2044,7 +2047,7 @@ async def voice_xp_task():
                     async with get_user_state_lock(uid):
                         user_data = await aget_user_exp(uid)
                         prev_level = calculate_level(user_data.get("exp", 0))
-                        user_data["exp"] = max(0, _safe_int(user_data.get("exp", 0), 0)) + gain
+                        user_data["exp"] = max(0, _safe_int(user_data.get("exp", 0), 0)) + season_policy.reward(gain)
                         if not is_special:
                             user_data["voice_minutes"] = max(0, _safe_int(user_data.get("voice_minutes", 0), 0)) + 1
                         user_data["last_activity"] = time.time()
@@ -2131,7 +2134,7 @@ async def repeat_vc_mission_task():
                         if reward_due:
                             uexp = await aget_user_exp(uid)
                             prev_level = calculate_level(uexp.get("exp", 0))
-                            uexp["exp"] = max(0, _safe_int(uexp.get("exp", 0), 0)) + REPEAT_VC_EXP_REWARD
+                            uexp["exp"] = max(0, _safe_int(uexp.get("exp", 0), 0)) + season_policy.reward(REPEAT_VC_EXP_REWARD)
                             uexp["level"] = calculate_level(uexp["exp"])
                             uexp["last_activity"] = time.time()
                             new_level = uexp["level"]
@@ -2261,7 +2264,7 @@ async def on_message(message):
             last_text_xp_at = float(user_data.get("last_text_xp_at", 0) or 0)
 
             if now_ts - last_text_xp_at >= COOLDOWN_SECONDS:
-                user_data["exp"] = max(0, _safe_int(user_data.get("exp", 0), 0)) + random.randint(1, 30)
+                user_data["exp"] = max(0, _safe_int(user_data.get("exp", 0), 0)) + season_policy.reward(random.randint(1, 30))
                 user_data["last_text_xp_at"] = now_ts
             user_data["last_activity"] = time.time()
 
@@ -2281,7 +2284,7 @@ async def on_message(message):
             if not bool(user_m["text"].get("completed")):
                 user_m["text"]["count"] = max(0, _safe_int(user_m["text"].get("count", 0), 0)) + 1
                 if user_m["text"]["count"] >= MISSION_REQUIRED_MESSAGES:
-                    reward_xp = MISSION_EXP_REWARD
+                    reward_xp = season_policy.reward(MISSION_EXP_REWARD)
                     user_data["exp"] += reward_xp
                     user_m["text"]["completed"] = True
                     quest_completed_now = True
@@ -2710,6 +2713,8 @@ async def deduct_xp(interaction: discord.Interaction, member: discord.Member, am
         return await interaction.response.send_message("❌ 차감 경험치는 1 이상이어야 합니다.", ephemeral=True)
 
     await interaction.response.defer(ephemeral=True)
+    if not await aseason_xp_enabled():
+        return await interaction.followup.send("시즌 정비 중에는 경험치를 변경할 수 없습니다.", ephemeral=True)
     uid = str(member.id)
     async with get_user_state_lock(uid):
         user_data = await aget_user_exp(uid)
@@ -2831,10 +2836,10 @@ async def activity(interaction: discord.Interaction):
         interaction.user, strip_title_suffix(interaction.user.display_name), um,
         attendance if isinstance(attendance, dict) else {}, today,
         xp.get("exp", 0), state, get_level_progress,
-        text_goal=MISSION_REQUIRED_MESSAGES, text_reward=MISSION_EXP_REWARD,
-        voice_goal=REPEAT_VC_REQUIRED_MINUTES, voice_reward=REPEAT_VC_EXP_REWARD,
-        voice_people=REPEAT_VC_MIN_PEOPLE, attendance_reward=ATTENDANCE_EXP_REWARD,
-        max_level=SEASON_MAX_LEVEL,
+        text_goal=MISSION_REQUIRED_MESSAGES, text_reward=season_policy.reward(MISSION_EXP_REWARD),
+        voice_goal=REPEAT_VC_REQUIRED_MINUTES, voice_reward=season_policy.reward(REPEAT_VC_EXP_REWARD),
+        voice_people=REPEAT_VC_MIN_PEOPLE, attendance_reward=season_policy.reward(ATTENDANCE_EXP_REWARD),
+        max_level=season_policy.cap(),
     )
     mark_operation(interaction, "활동 화면 전송")
     image = None
@@ -2934,7 +2939,7 @@ async def attend(interaction: discord.Interaction):
     week = get_week_key_kst(now)
     month = get_month_key_kst(now)
 
-    gain = ATTENDANCE_EXP_REWARD if await aseason_xp_enabled() else 0
+    gain = season_policy.reward(ATTENDANCE_EXP_REWARD) if await aseason_xp_enabled() else 0
     level_up = False
     final_level = 1
 
@@ -2947,7 +2952,7 @@ async def attend(interaction: discord.Interaction):
             ue = await aget_user_exp(uid)
             return await interaction.followup.send(
                 embed=attendance_embed(interaction.user, ud, ue.get("exp", 0),
-                                       get_level_progress, SEASON_MAX_LEVEL, already=True),
+                                       get_level_progress, season_policy.cap(), already=True),
                 **({"view": view} if (view := recovery_view(uid, ud)) is not None else {}))
 
         season = await aget_effective_season_state()
@@ -3004,7 +3009,7 @@ async def attend(interaction: discord.Interaction):
     mark_operation(interaction, "출석 결과 전송")
     await interaction.followup.send(
         embed=attendance_embed(interaction.user, ud, ue.get("exp", 0),
-                               get_level_progress, SEASON_MAX_LEVEL),
+                               get_level_progress, season_policy.cap()),
         **({"view": view} if (view := recovery_view(uid, ud)) is not None else {}))
 
 
@@ -3043,7 +3048,7 @@ async def attendance_recovery_interaction(interaction: discord.Interaction):
                 logging.exception("attendance recovery role/nickname refresh failed uid=%s", uid)
         await interaction.edit_original_response(
             embed=attendance_embed(interaction.user, ud, ue["exp"],
-                                   get_level_progress, SEASON_MAX_LEVEL), view=None)
+                                   get_level_progress, season_policy.cap()), view=None)
     except ValueError as error:
         await interaction.followup.send(str(error), ephemeral=True)
     except Exception as error:
