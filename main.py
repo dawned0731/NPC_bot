@@ -1,4 +1,6 @@
 from activity_guard import inactive_candidate
+from ranking_cache import RankingCache
+_RANKING_CACHE = RankingCache()
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
@@ -2866,7 +2868,9 @@ async def ranking(interaction: discord.Interaction):
             "현재 시즌패스 준비 중입니다. 첫 시즌 시작 후 랭킹이 공개됩니다."
         )
 
-    data = await aload_exp_data()
+    data = await _RANKING_CACHE.get(
+        (state.get("current_season_id"), state.get("status"), state.get("settled"),
+         state.get("settlement_token"), state.get("xp_generation")), aload_exp_data)
     if not isinstance(data, dict):
         data = {}
 
@@ -3335,7 +3339,12 @@ async def send_season_start_embed(
         perms = notice.permissions_for(me)
         if not (perms.view_channel and perms.send_messages and perms.embed_links):
             return False, "notice_permission_missing"
-        await notice.send(embed=embed, allowed_mentions=ALLOW_NO_PING)
+        from season_notice import send as send_season_notice
+        state = await aget_effective_season_state()
+        year, kind = state["current_season_id"].split("_", 1)
+        dates = _season_dates_for_type(int(year), kind)
+        reward = await _get_season_reward(state["current_season_id"])
+        await send_season_notice(notice, embed, state, dates, reward)
         return True, ""
     except Exception as e:
         logging.warning(f"[season_start] notice send failed: {e!r}")
