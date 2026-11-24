@@ -2,6 +2,7 @@
 from io import BytesIO
 from pathlib import Path
 import asyncio
+import math
 import discord
 from PIL import Image, ImageDraw, ImageFont
 
@@ -15,6 +16,33 @@ def render(state, dates, reward, kind='regular', font_path=FONT):
         raise FileNotFoundError('Korean season font unavailable')
     base,accent=COLORS[state['current_season_type']]
     image=Image.new('RGB',(1200,440),base);draw=ImageDraw.Draw(image)
+    # Subtle seasonal motifs remain behind text and require no external assets.
+    motif = Image.new('RGBA', image.size)
+    md = ImageDraw.Draw(motif)
+    ink = accent + '30'
+    season = state['current_season_type']
+    for cx, cy in ((1030, 80), (1130, 140), (1090, 370)):
+        if season == 'spring':
+            for n in range(5):
+                angle = n * math.tau / 5
+                x, y = cx + 20 * math.cos(angle), cy + 20 * math.sin(angle)
+                md.ellipse((x-17,y-17,x+17,y+17), fill=ink)
+        elif season == 'summer':
+            md.ellipse((cx-25,cy-25,cx+25,cy+25), fill=ink)
+            for n in range(8):
+                a = n * math.tau / 8
+                md.line((cx+32*math.cos(a),cy+32*math.sin(a),cx+45*math.cos(a),cy+45*math.sin(a)),fill=ink,width=4)
+        elif season == 'fall':
+            md.polygon([(cx,cy-40),(cx+12,cy-10),(cx+35,cy-20),(cx+23,cy+4),(cx+38,cy+16),(cx+6,cy+26),(cx,cy+43),(cx-6,cy+26),(cx-38,cy+16),(cx-23,cy+4),(cx-35,cy-20),(cx-12,cy-10)],fill=ink)
+        else:
+            for n in range(6):
+                a = n * math.tau / 6
+                md.line((cx,cy,cx+40*math.cos(a),cy+40*math.sin(a)),fill=ink,width=4)
+                for side in (-1,1):
+                    x,y = cx+25*math.cos(a),cy+25*math.sin(a)
+                    md.line((x,y,x+14*math.cos(a+side*.8),y+14*math.sin(a+side*.8)),fill=ink,width=3)
+    image = Image.alpha_composite(image.convert('RGBA'), motif).convert('RGB')
+    draw = ImageDraw.Draw(image)
     def font(size):return ImageFont.truetype(str(font_path),size)
     def fit(text,size,width):
         while size>16 and draw.textlength(text,font=font(size))>width:size-=1

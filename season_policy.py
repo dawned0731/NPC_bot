@@ -25,3 +25,9 @@ def multiplier(state=None, now=None):
 
 def reward(amount):return int(amount)*multiplier()
 def cap():return float('inf') if is_preseason() else 100
+
+def recovery_season(state):
+    # Existing regular-season recovery offers remain compatible. Settlement
+    # invalidates them even though the calendar season ID is unchanged.
+    sid = state.get('current_season_id')
+    return f'{sid}:preseason' if state.get('settled') else sid

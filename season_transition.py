@@ -9,6 +9,10 @@ class TransitionBlocked(ValueError):
     pass
 
 
+def epoch(state):
+    return f"{state.get('current_season_id')}:{int(bool(state.get('settled')))}:{int(state.get('xp_generation', 0))}"
+
+
 def preseason_active(state):
     return bool(state.get('first_season_started') and state.get('settled')
                 and state.get('status') == 'preseason')
@@ -71,6 +75,9 @@ def transition_regular(root, *, expected_id, calendar, stamp):
                  season_start_notice_pending_for=target,
                  season_start_notice_last_error='')
     root['season_state'] = state
+    for record in (root.get('exp_data') or {}).values():
+        if isinstance(record, dict):
+            record['_xp_epoch'] = epoch(state)
     root['season_transitions'] = {token: {'committed_at': stamp, 'target': target}}
     return root
 
@@ -107,21 +114,25 @@ def close_preseason(root, *, expected_id, calendar, now):
     if state.get('preseason_cleared_for') == expected_id:
         return root
     target = state.get('next_season_id')
+    start = next_start(calendar)
+    expected_target = f"{start.year}_{ {3:'spring',6:'summer',9:'fall',12:'winter'}[start.month]}"
     reward = (root.get('season_rewards') or {}).get(target) or {}
     job = root.get('season_settlement') or {}
-    ready = (state.get('settled') and state.get('next_ready')
+    ready = (target == expected_target and state.get('settled') and state.get('next_ready')
              and str(state.get('next_season_name') or '').strip()
              and reward.get('title_name')
              and (not job or job.get('season_id') != expected_id or job.get('core_done')))
     if not ready:
         state['preseason_clear_blocked'] = '정산·다음 시즌 이름·보상·후처리 확인 필요'
         return root
-    for record in (root.get('exp_data') or {}).values():
-        if isinstance(record, dict):
-            record.update(exp=0, level=1, voice_minutes=0, last_text_xp_at=0)
-    root.pop('mission_data', None)
     state.update(preseason_cleared_for=expected_id,
                  preseason_cleared_at=now.astimezone(KST).isoformat(),
                  preseason_clear_blocked='',
                  xp_generation=int(state.get('xp_generation', 0)) + 1)
+    for record in (root.get('exp_data') or {}).values():
+        if isinstance(record, dict):
+            record.update(exp=0, level=1, voice_minutes=0, last_text_xp_at=0)
+            record.pop('_mission', None)
+            record['_xp_epoch'] = epoch(state)
+    root.pop('mission_data', None)
     return root

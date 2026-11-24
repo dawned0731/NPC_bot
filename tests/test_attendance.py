@@ -94,7 +94,7 @@ class CallbackTests(unittest.IsolatedAsyncioTestCase):
         env = dict(mark_operation=mark_operation, failure_message=failure_message, discord=discord, datetime=datetime, timedelta=timedelta, time=time,
                    KST=timezone.utc, ATTENDANCE_EXP_REWARD=1200, SEASON_MAX_LEVEL=100,
                    get_week_key_kst=lambda n: 'week', get_month_key_kst=lambda n: 'month',
-                   aseason_xp_enabled=AsyncMock(return_value=True),
+                   aseason_xp_enabled=AsyncMock(return_value=True), touch_member_activity=AsyncMock(),
                    get_user_state_lock=lambda uid: asyncio.Lock(),
                    normalize_attendance_record=lambda r: r, _safe_int=lambda n, d: int(n),
                    aget_attendance_user=AsyncMock(side_effect=lambda uid: copy.deepcopy(record)),

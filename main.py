@@ -1,7 +1,9 @@
 from activity_guard import inactive_candidate
 import season_policy
+from season_storage import commit_updates, protected
+from contextlib import asynccontextmanager
 from season_runtime import close_if_due, open_regular
-from season_transition import closing_due
+from season_transition import closing_due, KST as SCHEDULE_KST
 from ranking_cache import RankingCache
 _RANKING_CACHE = RankingCache()
 import discord
@@ -602,7 +604,7 @@ async def asave_exp_data(data):
     return await asyncio.to_thread(save_exp_data, data)
 
 async def asave_user_exp(user_id, user_data):
-    return await asyncio.to_thread(save_user_exp, user_id, user_data)
+    return await afirebase_root_update_strict({f"exp_data/{user_id}": user_data})
 
 async def aload_mission_data():
     return await asyncio.to_thread(load_mission_data)
@@ -686,13 +688,16 @@ def guard_background_task(name: str):
     return decorator
 
 
-def get_user_state_lock(uid: str | int):
+@asynccontextmanager
+async def get_user_state_lock(uid: str | int):
     key = str(uid)
     lock = _USER_STATE_LOCKS.get(key)
     if lock is None:
         lock = asyncio.Lock()
         _USER_STATE_LOCKS[key] = lock
-    return SEASON_GATE.member(lock)
+    async with SEASON_GATE.member(lock):
+        await aget_effective_season_state()
+        yield
 
 
 async def aupdate_user_exp_fields(uid: str, fields: dict):
@@ -749,7 +754,8 @@ async def aget_user_exp(uid: str):
 
 async def aget_user_mission(uid: str, today: str):
     def _get():
-        val = db.reference("mission_data").child(uid).get()
+        record = db.reference("exp_data").child(uid).get() or {}
+        val = record.get("_mission") if "_xp_epoch" in record else db.reference("mission_data").child(uid).get()
         return daily_mission(val, today)
     return await asyncio.to_thread(_get)
 
@@ -934,7 +940,14 @@ async def asave_mission_data_strict(data: dict):
 
 
 async def afirebase_root_update_strict(updates: dict):
-    await asyncio.to_thread(firebase_root_update_strict, updates)
+    if protected(updates) and not any(p.startswith("season_state/") for p in updates):
+        expected = dict(season_policy.STATE.get())
+        if not expected:
+            raise ValueError("시즌 상태가 확인되지 않아 저장을 중단했습니다.")
+        await asyncio.to_thread(commit_updates, db, updates, expected,
+                                lambda: get_calendar_season_info(datetime.now(KST)))
+    else:
+        await asyncio.to_thread(firebase_root_update_strict, updates)
 
 def load_json(path):
     """로컬 JSON 파일 로드 (없으면 빈 dict)"""
@@ -1335,61 +1348,29 @@ async def aupdate_legacy_migration_record(season_id: str, data: dict):
     await asyncio.to_thread(lambda: _legacy_migration_ref(season_id).update(data))
 
 async def aget_effective_season_state() -> dict:
-    """달력 기준 상태를 계산하고 변경된 필드만 Firebase에 반영합니다."""
-    def _get_and_fix():
+    def load():
         cal = get_calendar_season_info(datetime.now(KST))
+        def fix(raw):
+            state = {**_default_season_state_from_calendar(cal), **(raw or {})}
+            if not state.get("first_season_started"):
+                state.update(current_season_id=cal["season_id"], status=SEASON_STATUS_LOCKED)
+            elif state["current_season_id"] != cal["season_id"]:
+                state["status"] = SEASON_STATUS_LOCKED
+            else:
+                state.update(status=cal["status"], current_season_type=cal["season_type"], current_season_label=cal["season_label"])
+                if not state.get("next_ready"):
+                    state["next_season_id"] = cal["next_season_id"]
+            if state.get("first_season_started"):
+                year, kind = state["current_season_id"].split("_", 1)
+                if closing_due(_season_dates_for_type(int(year), kind), datetime.now(KST)):
+                    state["status"] = SEASON_STATUS_LOCKED
+            return state
         ref = _season_state_ref()
-        state = ref.get()
-
-        if not isinstance(state, dict):
-            persisted = _default_season_state_from_calendar(cal)
-            ref.set(persisted)
-            return {**persisted, "calendar": cal}
-
-        patch: dict[str, object] = {}
-        defaults = _default_season_state_from_calendar(cal)
-        for key, value in defaults.items():
-            if key not in state:
-                patch[key] = value
-
-        effective = {**state, **patch}
-        if not effective.get("first_season_started"):
-            desired = {
-                "current_season_id": cal["season_id"],
-                "current_season_type": cal["season_type"],
-                "current_season_label": cal["season_label"],
-                "next_season_id": cal["next_season_id"],
-                "status": SEASON_STATUS_LOCKED,
-            }
-        elif effective.get("current_season_id") != cal["season_id"]:
-            desired = {
-                "status": SEASON_STATUS_LOCKED,
-            }
-        else:
-            desired = {
-                "status": cal["status"],
-                "current_season_type": cal["season_type"],
-                "current_season_label": cal["season_label"],
-                "next_season_id": cal["next_season_id"],
-            }
-
-        if effective.get("first_season_started"):
-            stored_year, stored_kind = effective["current_season_id"].split("_", 1)
-            if closing_due(_season_dates_for_type(int(stored_year), stored_kind), datetime.now(KST)):
-                desired["status"] = SEASON_STATUS_LOCKED
-
-        for key, value in desired.items():
-            if effective.get(key) != value:
-                patch[key] = value
-                effective[key] = value
-
-        if patch:
-            ref.update(patch)
-
-        effective["calendar"] = cal
-        return effective
-
-    return season_policy.bind(await asyncio.to_thread(_get_and_fix))
+        raw = ref.get()
+        desired = fix(raw)
+        value = raw if desired == raw else ref.transaction(fix)
+        return dict(value, calendar=cal)
+    return season_policy.bind(await asyncio.to_thread(load))
 
 
 async def aseason_xp_enabled() -> bool:
@@ -1473,7 +1454,8 @@ async def aget_equipped_title_text(uid: str, level: int) -> str:
         if isinstance(title, dict) and title.get("title_name"):
             return str(title["title_name"])
 
-    return progress_title_text(level, state)
+    current = await aget_user_exp(uid)
+    return progress_title_text(calculate_level(current.get("exp", 0)), state)
 
 
 async def apply_member_title(member: discord.Member, level: int) -> bool:
@@ -1574,7 +1556,16 @@ async def maybe_award_level100(member: discord.Member, level: int, *, reason: st
         }
         if not isinstance(titles.get("equipped"), dict):
             award_updates[f"user_titles/{uid}/equipped"] = {"type": "progress"}
-        firebase_root_update_strict(award_updates)
+        def commit_award(root):
+            current = (root or {}).get("season_state") or {}
+            xp = ((root or {}).get("exp_data") or {}).get(uid) or {}
+            if (current.get("current_season_id") != season_id or current.get("settled")
+                    or current.get("status") != SEASON_STATUS_REGULAR
+                    or int(xp.get("exp", 0)) < SEASON_TOTAL_XP_TO_MAX):
+                raise ValueError("시즌 또는 경험치가 변경되어 이전 보상 요청을 취소했습니다.")
+            from season_storage import apply_patch
+            return apply_patch(root, award_updates)
+        db.reference().transaction(commit_award)
         return {
             "awarded": not already_owned,
             "reason": "ok" if not already_owned else "metadata_updated",
@@ -1586,6 +1577,12 @@ async def maybe_award_level100(member: discord.Member, level: int, *, reason: st
         # 잠금을 기다리는 사이 다른 루틴이 지급을 끝냈을 수 있습니다.
         if cache_key in _LEVEL100_AWARD_CACHE:
             return {"awarded": False, "reason": "already_owned_cached"}
+        fresh = season_policy.STATE.get()
+        current = await aget_user_exp(uid)
+        if (fresh.get("current_season_id") != season_id or fresh.get("settled")
+                or fresh.get("status") != SEASON_STATUS_REGULAR
+                or int(current.get("exp", 0)) < SEASON_TOTAL_XP_TO_MAX):
+            return {"awarded": False, "reason": "season_or_balance_changed"}
         result = await asyncio.to_thread(_award_sync)
         if result.get("reward_given"):
             _LEVEL100_AWARD_CACHE.add(cache_key)
@@ -2051,6 +2048,9 @@ async def voice_xp_task():
                         gain = max(1, int(gain * 0.2))
 
                     async with get_user_state_lock(uid):
+                        if season_policy.multiplier() == 0:
+                            await afirebase_root_update_strict({f"exp_data/{uid}/last_activity": time.time()})
+                            continue
                         user_data = await aget_user_exp(uid)
                         prev_level = calculate_level(user_data.get("exp", 0))
                         user_data["exp"] = max(0, _safe_int(user_data.get("exp", 0), 0)) + season_policy.reward(gain)
@@ -2117,6 +2117,8 @@ async def repeat_vc_mission_task():
                 new_level = prev_level = 1
                 try:
                     async with get_user_state_lock(uid):
+                        if season_policy.multiplier() == 0:
+                            continue
                         today = datetime.now(KST).strftime("%Y-%m-%d")
                         user_m = await aget_user_mission(uid, today)
                         if not isinstance(user_m, dict) or user_m.get("date") != today:
@@ -2158,7 +2160,7 @@ async def repeat_vc_mission_task():
                         if log:
                             await log.send(
                                 f"[🧾 로그] {member.display_name} 님이 반복 VC 미션 완료! "
-                                f"+{REPEAT_VC_EXP_REWARD}XP",
+                                f"+{season_policy.reward(REPEAT_VC_EXP_REWARD)}XP",
                                 allowed_mentions=ALLOW_NO_PING,
                             )
                 except Exception as e:
@@ -2194,7 +2196,7 @@ async def voice_count_channel_task():
         except Exception as e:
             logging.exception(f"[voice-count] guild={guild.id} error: {e}")
 
-@tasks.loop(seconds=30)
+@tasks.loop(minutes=5)
 @guard_background_task("season_transition")
 async def season_transition_task():
     """
@@ -2208,7 +2210,7 @@ async def season_transition_task():
     except Exception as e:
         logging.exception(f"[season_transition_task] error: {e}")
 
-@tasks.loop(time=[dtime(hour=23, tzinfo=KST), dtime(hour=0, tzinfo=KST)])
+@tasks.loop(time=[dtime(hour=23, tzinfo=SCHEDULE_KST), dtime(hour=0, tzinfo=SCHEDULE_KST)])
 @guard_background_task("season_boundary")
 async def season_boundary_task():
     for guild in bot.guilds:
@@ -2271,6 +2273,8 @@ async def on_message(message):
         final_level = 1
 
         async with get_user_state_lock(uid):
+            if season_policy.multiplier() == 0:
+                return
             user_data = await aget_user_exp(uid)
             prev_level = calculate_level(user_data.get("exp", 0))
             last_text_xp_at = float(user_data.get("last_text_xp_at", 0) or 0)
@@ -2654,7 +2658,7 @@ async def grant_xp(interaction: discord.Interaction, member: discord.Member, amo
     await interaction.response.defer(ephemeral=True)
     if not await aseason_xp_enabled():
         return await interaction.followup.send(
-            "현재는 프리시즌/시즌 잠금 상태라 경험치를 지급할 수 없습니다.",
+            "현재는 정산 대기 또는 시즌 정비 중이라 경험치를 지급할 수 없습니다.",
             ephemeral=True,
         )
 
@@ -2951,11 +2955,13 @@ async def attend(interaction: discord.Interaction):
     week = get_week_key_kst(now)
     month = get_month_key_kst(now)
 
-    gain = season_policy.reward(ATTENDANCE_EXP_REWARD) if await aseason_xp_enabled() else 0
+    await touch_member_activity(uid)
+    gain = 0
     level_up = False
     final_level = 1
 
     async with get_user_state_lock(uid):
+        gain = season_policy.reward(ATTENDANCE_EXP_REWARD)
         ud = normalize_attendance_record(await aget_attendance_user(uid))
         prev_last = ud.get("last_date", "")
 
@@ -2968,7 +2974,7 @@ async def attend(interaction: discord.Interaction):
                 **({"view": view} if (view := recovery_view(uid, ud)) is not None else {}))
 
         season = await aget_effective_season_state()
-        ud["recovery"] = recovery_offer(ud, today_str, season.get("current_season_id"))
+        ud["recovery"] = recovery_offer(ud, today_str, season_policy.recovery_season(season))
         ud["recovered_cost"] = 0
         ud["daily_gain"] = gain
         new_streak = ud["streak"] + 1 if prev_last == yesterday else 1
@@ -3046,7 +3052,7 @@ async def attendance_recovery_interaction(interaction: discord.Interaction):
             ud = normalize_attendance_record(await aget_attendance_user(uid))
             ue = await aget_user_exp(uid)
             season = await aget_effective_season_state()
-            ud, ue = apply_recovery(ud, ue, today, season.get("current_season_id"), calculate_level)
+            ud, ue = apply_recovery(ud, ue, today, season_policy.recovery_season(season), calculate_level)
             mark_operation(interaction, "출석 복구 저장", "saving")
             await afirebase_root_update_strict({
                 f"{ATTENDANCE_DB_KEY}/{uid}": ud,
@@ -3342,6 +3348,17 @@ def build_first_season_start_embed(
     return embed
 
 
+async def send_settlement_notice(channel, state, job):
+    from season_notice import send as send_notice
+    year, kind = state["current_season_id"].split("_", 1)
+    dates = _season_dates_for_type(int(year), kind)
+    pre = not closing_due(dates, datetime.now(KST)) and get_calendar_season_info()["season_id"] == state["current_season_id"]
+    embed = discord.Embed(title=f"{job['season_name']} 시즌 정산 완료", color=0xD9A65C,
+        description=("정규 시즌 기록과 보상 지급을 마쳤습니다.\n프리시즌: 자동 경험치 10배 · 무제한 레벨\n마지막 날 23:00에 경험치와 미션이 초기화됩니다."
+                     if pre else "정규 시즌 기록과 보상 지급을 마쳤습니다. 다음 시즌 준비 상태를 확인해주세요."))
+    await send_notice(channel, embed, state, dates, job['reward'], kind='preseason' if pre else 'settled')
+
+
 async def send_season_start_embed(
     guild: discord.Guild,
     *,
@@ -3442,7 +3459,7 @@ async def _process_season_start_if_needed_locked(guild: discord.Guild) -> dict:
                     try:
                         await notice.send(
                             f"📢 `{state.get('current_season_name', '현재 시즌')}` 시즌 정산이 완료되었습니다. "
-                            "프리시즌 동안 시즌 경험치 획득이 중단됩니다.",
+                            "프리시즌은 정산 후 경험치 10배·무제한 레벨로 진행되며 마감일 23시에 종료됩니다.",
                             allowed_mentions=ALLOW_NO_PING,
                         )
                         notice_sent = True
@@ -3470,7 +3487,7 @@ async def _process_season_start_if_needed_locked(guild: discord.Guild) -> dict:
             try:
                 await notice.send(
                     f"📢 `{state.get('current_season_name', '현재 시즌')}` 시즌 정산이 완료되었습니다. "
-                    "프리시즌 동안 시즌 경험치 획득이 중단됩니다.",
+                    "프리시즌은 정산 후 경험치 10배·무제한 레벨로 진행되며 마감일 23시에 종료됩니다.",
                     allowed_mentions=ALLOW_NO_PING,
                 )
                 await _update_season_state({
@@ -3484,7 +3501,8 @@ async def _process_season_start_if_needed_locked(guild: discord.Guild) -> dict:
 
     # 첫 시즌 DB 커밋 후 역할/닉네임 후처리가 중간에 끊겼다면 자동 복구합니다.
     if current_id == calendar_id:
-        migration = await aget_legacy_migration_record(calendar_id)
+        migration_status = await asyncio.to_thread(lambda: _legacy_migration_ref(calendar_id).child("status").get())
+        migration = await aget_legacy_migration_record(calendar_id) if migration_status == "db_committed" else {}
         if (
             migration.get("type") == "first_season_start"
             and migration.get("status") == "db_committed"
@@ -3760,7 +3778,7 @@ async def first_season_start(
     reward = await _get_season_reward(season_id)
     if not reward.get("title_name"):
         return await interaction.followup.send(
-            "❌ 먼저 `/시즌보상설정`으로 첫 시즌 Lv.100 보상을 설정해주세요.",
+            "❌ 먼저 `/시즌관리 → 시즌 보상 설정`으로 첫 시즌 Lv.100 보상을 설정해주세요.",
             ephemeral=True,
         )
 
@@ -4069,6 +4087,8 @@ async def season_info(interaction: discord.Interaction):
     state = await aget_effective_season_state()
     cal = state.get("calendar") or get_calendar_season_info(datetime.now(KST))
     current_season_id = state.get("current_season_id") or cal["season_id"]
+    year, kind = current_season_id.split("_", 1)
+    cal = dict(cal, **_season_dates_for_type(int(year), kind))
     reward = await _get_season_reward(current_season_id)
 
     uid = str(interaction.user.id)
@@ -4088,9 +4108,9 @@ async def season_info(interaction: discord.Interaction):
     elif status == SEASON_STATUS_PRESEASON:
         remain_label = f"D-{days_left_until(cal['preseason_end'])}"
         if state.get("settled") and state.get("next_ready"):
-            status_desc = "경험치 획득 중단 · 다음 시즌 준비 완료"
+            status_desc = "자동 경험치 10배 · 무제한 레벨 · 다음 시즌 준비 완료"
         elif state.get("settled"):
-            status_desc = "경험치 획득 중단 · 정산 완료 · 다음 시즌 준비 필요"
+            status_desc = "자동 경험치 10배 · 무제한 레벨 · 다음 시즌 준비 필요"
         else:
             status_desc = "경험치 획득 중단 · 현재 시즌 정산 필요"
     else:
@@ -4121,9 +4141,11 @@ async def season_info(interaction: discord.Interaction):
     embed.add_field(
         name="진행 기준",
         value=(
-            f"최대 레벨: Lv.{SEASON_MAX_LEVEL}\n"
-            f"1레벨 필요 경험치: {SEASON_XP_PER_LEVEL:,} XP\n"
-            f"Lv.{SEASON_MAX_LEVEL} 필요 경험치: {SEASON_TOTAL_XP_TO_MAX:,} XP"
+            ("최대 레벨: 제한 없음 · 자동 경험치 10배\n" if season_policy.is_preseason(state)
+             else f"최대 레벨: Lv.{SEASON_MAX_LEVEL}\n")
+            + f"1레벨 필요 경험치: {SEASON_XP_PER_LEVEL:,} XP\n"
+            + ("마지막 날 23:00부터 경험치 획득 중단 및 초기화" if season_policy.is_preseason(state)
+               else f"Lv.{SEASON_MAX_LEVEL} 필요 경험치: {SEASON_TOTAL_XP_TO_MAX:,} XP")
         ),
         inline=False,
     )
@@ -4138,7 +4160,8 @@ async def season_info(interaction: discord.Interaction):
     )
     embed.add_field(
         name="현재 시즌 보상",
-        value=f"[ {reward.get('title_name', '아직 설정되지 않음')} ]",
+        value=("프리시즌에는 정규 시즌 Lv.100 보상을 지급하지 않습니다." if state.get("settled")
+               else f"[ {reward.get('title_name', '아직 설정되지 않음')} ]"),
         inline=False,
     )
 
@@ -4163,14 +4186,14 @@ async def season_info(interaction: discord.Interaction):
 
     if status == SEASON_STATUS_LOCKED:
         if not state.get("first_season_started"):
-            embed.set_footer(text="첫 시즌 시작 전입니다. 관리자가 /시즌보상설정 후 /첫시즌시작 을 실행해야 시즌패스가 열립니다.")
+            embed.set_footer(text="첫 시즌 시작 전입니다. 관리자가 /시즌관리 → 시즌 보상 설정 후 /첫시즌시작 을 실행해야 시즌패스가 열립니다.")
         else:
-            embed.set_footer(text="/현재시즌초기화, /다음시즌준비, 다음 시즌 보상 설정을 완료해야 시즌이 열립니다.")
+            embed.set_footer(text="/시즌관리 → 현재 시즌 정산, /시즌관리 → 다음 시즌 준비, 다음 시즌 보상 설정을 완료해야 시즌이 열립니다.")
     elif status == SEASON_STATUS_PRESEASON:
         if not state.get("settled"):
-            embed.set_footer(text="프리시즌 기간입니다. 관리자가 /현재시즌초기화 로 현재 시즌을 정산해야 합니다.")
+            embed.set_footer(text="프리시즌 기간입니다. 관리자가 /시즌관리 → 현재 시즌 정산 로 현재 시즌을 정산해야 합니다.")
         elif not state.get("next_ready"):
-            embed.set_footer(text="현재 시즌 정산이 완료되었습니다. 관리자가 /다음시즌준비 로 다음 시즌명을 등록해야 합니다.")
+            embed.set_footer(text="현재 시즌 정산이 완료되었습니다. 관리자가 /시즌관리 → 다음 시즌 준비 로 다음 시즌명을 등록해야 합니다.")
         else:
             embed.set_footer(text="다음 시즌 이름과 보상을 모두 설정하면 시작일에 자동으로 시즌이 열립니다.")
 
@@ -4273,22 +4296,22 @@ async def next_season_prepare(interaction: discord.Interaction, 시즌이름: st
 
     if not state.get("first_season_started"):
         return await interaction.response.send_message(
-            "❌ 첫 시즌 시작 전에는 `/다음시즌준비`를 사용할 수 없습니다.\n"
-            "먼저 `/시즌보상설정` 후 `/첫시즌시작`으로 첫 시즌을 개방해주세요.",
+            "❌ 첫 시즌 시작 전에는 `/시즌관리 → 다음 시즌 준비`를 사용할 수 없습니다.\n"
+            "먼저 `/시즌관리 → 시즌 보상 설정` 후 `/첫시즌시작`으로 첫 시즌을 개방해주세요.",
             ephemeral=True
         )
 
     if not state.get("settled"):
         return await interaction.response.send_message(
             "❌ 현재 시즌 정산이 완료되지 않았습니다.\n"
-            "먼저 프리시즌 기간에 `/현재시즌초기화`로 현재 시즌을 정산한 뒤 `/다음시즌준비`를 실행해주세요.",
+            "먼저 프리시즌 기간에 `/시즌관리 → 현재 시즌 정산`로 현재 시즌을 정산한 뒤 `/시즌관리 → 다음 시즌 준비`를 실행해주세요.",
             ephemeral=True
         )
 
     if state.get("status") == SEASON_STATUS_REGULAR:
         return await interaction.response.send_message(
-            "❌ 정규 시즌 중에는 `/다음시즌준비`를 사용할 수 없습니다.\n"
-            "프리시즌에 `/현재시즌초기화`로 정산을 완료한 뒤 다음 시즌을 준비해주세요.",
+            "❌ 정규 시즌 중에는 `/시즌관리 → 다음 시즌 준비`를 사용할 수 없습니다.\n"
+            "프리시즌에 `/시즌관리 → 현재 시즌 정산`로 정산을 완료한 뒤 다음 시즌을 준비해주세요.",
             ephemeral=True
         )
 
@@ -4638,6 +4661,7 @@ async def health(_request):
     """프로세스와 웹 서버 생존 여부를 반환합니다."""
     return web.json_response({
         "process": "ok",
+        "commit": os.getenv("RENDER_GIT_COMMIT", "local"),
         "discord_ready": bool(bot.is_ready()),
         "guild_count": len(bot.guilds),
     })
@@ -4649,6 +4673,7 @@ async def readiness(_request):
     return web.json_response(
         {
             "ready": ready,
+            "commit": os.getenv("RENDER_GIT_COMMIT", "local"),
             "discord_user": str(bot.user) if bot.user else None,
             "guild_count": len(bot.guilds),
         },
