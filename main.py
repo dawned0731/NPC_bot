@@ -1932,6 +1932,13 @@ async def inactive_user_log_task():
                 last_active = datetime.fromtimestamp(last_ts, KST)
                 if last_active >= threshold:
                     continue
+                if not inactive_candidate(
+                    last_ts, threshold.timestamp(),
+                    recent_activity=_ACTIVITY_OBSERVED_TS.get(str(member.id), 0),
+                    joined_at=member.joined_at.timestamp() if member.joined_at else 0,
+                    in_voice=bool(member.voice and member.voice.channel),
+                ):
+                    continue
 
                 try:
                     embed = discord.Embed(
@@ -2192,7 +2199,7 @@ async def season_transition_task():
 
 @bot.event
 async def on_message(message):
-    if message.guild and not message.author.bot:
+    if message.guild and not message.author.bot and not getattr(message, "webhook_id", None):
         try:
             await touch_member_activity(str(message.author.id))
         except Exception:
@@ -4844,6 +4851,9 @@ async def _main():
                                                 last_activity=get_departure_last_activity)
     # 이후 디스코드 로그인 루프 진입
     await _safe_start()
+
+from season_admin import install as install_season_admin
+install_season_admin(globals())
 
 if __name__ == "__main__":
     asyncio.run(_main())

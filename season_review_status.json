@@ -1,0 +1,20 @@
+{
+  "baseline": "af8a6d1",
+  "removed_functions": [],
+  "changed_functions": [
+    "inactive_user_log_task",
+    "on_message",
+    "touch_member_activity"
+  ],
+  "login_unchanged": true,
+  "runtime_season_policy_connected": false,
+  "preseason_transition_connected": false,
+  "season_admin_connected": true,
+  "notice_images_connected": false,
+  "deployment_blocked": true,
+  "blockers": [
+    "XP writers do not validate season generation at commit; delayed writes can cross a transition",
+    "Independent preseason XP policy and unlimited levels are not integrated into all runtime entry points",
+    "Season notice renderer and production transition integration remain incomplete"
+  ]
+}
